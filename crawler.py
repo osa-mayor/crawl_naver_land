@@ -12,7 +12,7 @@ from datetime import datetime
 # Target Regions (URL List)
 # Add more URLs here to crawl multiple regions sequentially.
 TARGET_URLS = [
-    "https://fin.land.naver.com/regions?si=1100000000&gun=1171000000&eup=1171011100", # Seoul Songpa-gu Bangi-dong
+    "https://fin.land.naver.com/regions?si=1100000000&gun=1174000000&eup=1174010600", # Seoul Gangdong-gu Dunchon-dong
 ]
 
 # Filtering Options
@@ -269,8 +269,33 @@ class NaverLandPlaywright:
                     except Exception as e:
                         logging.warning(f"Nav error {cid}: {e}")
                     
-                    # Wait for API to fire
-                    await page.wait_for_timeout(4000)
+                    # Wait for initial load
+                    await page.wait_for_timeout(2000)
+
+                    # ---------------------------
+                    # Scroll to Load All Articles
+                    # ---------------------------
+                    logging.info("Scrolling to load all articles...")
+                    last_height = await page.evaluate("document.body.scrollHeight")
+                    no_change_count = 0
+                    
+                    while True:
+                        # Scroll to bottom
+                        await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+                        
+                        # Wait for potential load
+                        await page.wait_for_timeout(1500)
+                        
+                        new_height = await page.evaluate("document.body.scrollHeight")
+                        if new_height == last_height:
+                            no_change_count += 1
+                            if no_change_count >= 2: # Stop if no change for 2 iterations
+                                break
+                        else:
+                            no_change_count = 0 # Reset if height changed
+                            logging.info("Scroll triggered new content...")
+                        
+                        last_height = new_height
             
             await browser.close()
 
