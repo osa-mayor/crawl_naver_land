@@ -5,3 +5,6 @@ __pycache__/
 *.xlsx
 ~$*.xlsx
 .DS_Store
+debug_item.json
+parse_log.py
+test_extraction.py
