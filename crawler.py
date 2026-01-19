@@ -15,7 +15,7 @@ from land_selectors import NaverLandSelectors
 # ==========================================
 # Target Regions (Search by Name using naver_region_codes.json)
 TARGET_REGIONS = [
-    "경기도 가평군"
+    "서울시"
 ]
 
 # (Optional) RAW URLs override or addition
@@ -133,7 +133,7 @@ class NaverLandPlaywright:
         """Logic for processing a single region tab (was inside the loop previously)"""
         try:
             # 1. Go to Region
-            await page.goto(target_url, wait_until="domcontentloaded", timeout=45000)
+            await page.goto(target_url, wait_until="domcontentloaded", timeout=60000)
             await page.wait_for_timeout(random.uniform(2000, 3000))
         except Exception as e:
             logging.error(f"Failed to load region page {target_url}: {e}")
@@ -301,7 +301,7 @@ class NaverLandPlaywright:
                 detail_url = f"https://fin.land.naver.com/complexes/{cid}?tab=article&tradeType={t_type}&articleTradeTypes={t_type}&articleSortingType=PRICE_ASC"
                 
                 try:
-                    await page.goto(detail_url, wait_until="domcontentloaded", timeout=30000)
+                    await page.goto(detail_url, wait_until="domcontentloaded", timeout=45000)
                     
                     # Wait less time now since we don't need to fetch complex info
                     await page.wait_for_timeout(random.uniform(500, 1000))
