@@ -27,7 +27,7 @@ EXCLUDE_LOW_FLOORS = False
 
 # [System Config]
 MAX_CONCURRENT_PAGES = 3  # Number of simultaneous tabs/browsers
-HEADLESS_MODE = False      # Set to False to watch process
+HEADLESS_MODE = True      # Set to False to watch process
 DB_PATH = "real_estate.db" # SQLite Database File
 
 # ==========================================
