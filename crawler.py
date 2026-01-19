@@ -15,7 +15,7 @@ from land_selectors import NaverLandSelectors
 # ==========================================
 # Target Regions (Search by Name using naver_region_codes.json)
 TARGET_REGIONS = [
-    "서울시"
+    "경기도 가평군"
 ]
 
 # (Optional) RAW URLs override or addition

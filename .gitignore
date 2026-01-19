@@ -17,3 +17,6 @@ fetch_region_codes.py
 real_estate.db
 export_db.py
 token.txt
+
+# Local Mirror of Private DB
+private-land-db/
