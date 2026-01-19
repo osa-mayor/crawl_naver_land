@@ -26,7 +26,7 @@ MIN_HOUSEHOLDS = 100
 EXCLUDE_LOW_FLOORS = False
 
 # [System Config]
-MAX_CONCURRENT_PAGES = 3  # Number of simultaneous tabs/browsers
+MAX_CONCURRENT_PAGES = int(os.getenv("MAX_CONCURRENT_PAGES", 3))  # Configurable via Env Var
 HEADLESS_MODE = True      # Set to False to watch process
 DB_PATH = "real_estate.db" # SQLite Database File
 
