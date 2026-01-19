@@ -8,3 +8,7 @@ __pycache__/
 debug_item.json
 parse_log.py
 test_extraction.py
+
+crawler_excel.py
+summarizer.py
+fetch_region_codes.py

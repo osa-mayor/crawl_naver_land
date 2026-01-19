@@ -7,6 +7,7 @@ from playwright.async_api import async_playwright
 import logging
 from datetime import datetime
 import os
+import sqlite3
 from land_selectors import NaverLandSelectors
 
 # ==========================================
@@ -27,6 +28,7 @@ EXCLUDE_LOW_FLOORS = False
 # [System Config]
 MAX_CONCURRENT_PAGES = 3  # Number of simultaneous tabs/browsers
 HEADLESS_MODE = False      # Set to False to watch process
+DB_PATH = "real_estate.db" # SQLite Database File
 
 # ==========================================
 
@@ -35,7 +37,7 @@ logging.basicConfig(
     format='%(asctime)s - %(levelname)s - %(message)s',
     handlers=[
         logging.StreamHandler(),
-        logging.FileHandler("crawling.log", encoding="utf-8")
+        logging.FileHandler("crawling_db.log", encoding="utf-8")
     ]
 )
 
@@ -557,7 +559,10 @@ class NaverLandPlaywright:
                         "용적률": far,
                         "건폐율": bcr,
                         "위도": lat,
-                        "경도": long
+                        "경도": long,
+                        # For DB tracking
+                        "수집일": datetime.now().strftime("%Y-%m-%d"),
+                        "complex_id": cid # Keep raw ID
                     })
 
         return pd.DataFrame(results)
@@ -629,8 +634,22 @@ def get_subregions(region_name):
     except: pass
     return []
 
+def save_to_db(df, table_name="real_estate"):
+    """Save DataFrame to SQLite Database"""
+    if df.empty: return
+    
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        # Using 'append' to add new data every run
+        # Ideally we should handle duplicates, but for pure history tracking, append is safer.
+        # Queries can filter by '수집일' later.
+        df.to_sql(table_name, conn, if_exists="append", index=False)
+        conn.close()
+        print(f"💾 Database Updated: Added {len(df)} rows to '{table_name}' table.")
+    except Exception as e:
+        print(f"❌ Database Error: {e}")
+
 async def main():
-    # global TARGET_URLS (Removed)
     
     # 1. Identify Processing Plan
     regions_to_process = []
@@ -640,14 +659,6 @@ async def main():
         if subregions:
             print(f"🏙️ '{target}' Detected! Splitting into {len(subregions)} sub-regions...")
             for sub in subregions:
-                # Construct sub-region name (e.g., "서울시 강남구", "경기도 수원시")
-                # Wait, naver_region_codes keys are top level.
-                # If target is "서울시", sub is "강남구".
-                # If target is "경기도", sub is "가평군", "수원시" etc.
-                # BUT "수원시" might need further splitting into Gu? (Suwon has Gus)
-                # Let's check get_region_urls logic. It traverses down to leaf.
-                # If we pass "경기도 수원시", get_region_urls will find all dongs in Suwon.
-                # This is a good batch size.
                 regions_to_process.append(f"{target} {sub}")
         else:
             regions_to_process.append(target)
@@ -676,8 +687,6 @@ async def main():
             print(f"⚠️ No URLs found for {region_name}")
             continue
             
-        # TARGET_URLS = current_urls (Removed)
-        
         # New Crawler Instance per Gu
         crawler = NaverLandPlaywright()
         crawler.region_name = region_name # Pass region name for fallback
@@ -687,22 +696,12 @@ async def main():
         # Process & Save
         df = crawler.process_data()
         
-        # Output Filename logic
-        output_dir = "results"
-        if not os.path.exists(output_dir): os.makedirs(output_dir)
-        
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        safe_name = region_name.replace(" ", "_").replace("/", "_")
-        filename = os.path.join(output_dir, f"{safe_name}_{timestamp}.xlsx")
-
+        # Output to DB Logic
         if not df.empty:
-            a_cols = ["공급면적", "전용면적"]
-            for a in a_cols:
-                 if a in df.columns:
-                     df[a] = df[a].apply(lambda x: f"{int(round(float(x)))} ({int(round(float(x)/3.3058))})" if pd.notnull(x) else "")
-            
-            df.to_excel(filename, index=False)
-            print(f"✅ Saved: {filename} ({len(df)} items)")
+            # Clean up columns for DB (Remove complex formulas like hyperlinks for raw data?)
+            # Actually, keep them as text.
+            # But maybe sanitize types.
+            save_to_db(df)
         else:
             print(f"⚠️ No data for {region_name}")
 
