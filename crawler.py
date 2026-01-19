@@ -1,81 +1,88 @@
 import asyncio
 import re
 import json
+import random
 import pandas as pd
 from playwright.async_api import async_playwright
 import logging
 from datetime import datetime
+import os
+from land_selectors import NaverLandSelectors
 
 # ==========================================
 # [Configuration]
 # ==========================================
-# Target Regions (URL List)
-# Add more URLs here to crawl multiple regions sequentially.
-TARGET_URLS = [
-    "https://fin.land.naver.com/regions?si=1100000000&gun=1174000000&eup=1174010600",  # Seoul Gangdong-gu Dunchon-dong
+# Target Regions (Search by Name using naver_region_codes.json)
+TARGET_REGIONS = [
+    "서울시"
 ]
 
+# (Optional) RAW URLs override or addition
+TARGET_URLS = []
+
 # Filtering Options
-MIN_HOUSEHOLDS = 100  # Minimum number of households
-EXCLUDE_LOW_FLOORS = False  # Set to False to collect ALL items, then classify in logic
+MIN_HOUSEHOLDS = 100
+EXCLUDE_LOW_FLOORS = False
+
+# [System Config]
+MAX_CONCURRENT_PAGES = 3  # Number of simultaneous tabs/browsers
+HEADLESS_MODE = False      # Set to False to watch process
+
 # ==========================================
 
 logging.basicConfig(
     level=logging.INFO,
-    format="%(asctime)s - %(levelname)s - %(message)s",
+    format='%(asctime)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler("crawler.log", encoding="utf-8"),
         logging.StreamHandler(),
-    ],
+        logging.FileHandler("crawling.log", encoding="utf-8")
+    ]
 )
 
+# User-Agent List for Stealth
+USER_AGENTS = [
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Edge/120.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/605.1.15"
+]
 
 class DataProcessor:
     @staticmethod
-    def is_low_or_top_floor(floor_info: str) -> bool:
-        if not floor_info:
-            return False
-
+    def is_low_floor(floor_info: str) -> bool:
+        if not floor_info: return False
         target_floors = ["1", "2", "3", "저"]
         floor_str = floor_info.split("/")[0].strip()
-
-        if floor_str in target_floors:
-            return True
-        if floor_str.isdigit() and int(floor_str) <= 3:
-            return True
-        if "탑" in floor_info:
-            return True
-
-        parts = floor_info.split("/")
-        if len(parts) == 2:
-            curr, total = parts[0].strip(), parts[1].strip()
-            if curr.isdigit() and total.isdigit():
-                if int(curr) == int(total):
-                    return True
+        if floor_str in target_floors: return True
+        if floor_str.isdigit() and int(floor_str) <= 3: return True
         return False
 
     @staticmethod
     def format_price(num):
-        if num == 0:
-            return "-"
-        # Input is in Won (e.g., 1,600,000,000)
+        if num == 0: return "-"
         eok = num // 100000000
         remainder = num % 100000000
         man = remainder // 10000
-
-        if man > 0:
-            return f"{eok}억 {man:,}"
+        if man > 0: return f"{eok}억 {man:,}"
         return f"{eok}억"
-
 
 class NaverLandPlaywright:
     def __init__(self):
-        self.results = []
         self.complexes = {}
         self.captured_articles = {}
-        self.handle_response_wrapper = None
+        
+    def get_context_options(self):
+        ua = random.choice(USER_AGENTS)
+        return {
+            "user_agent": ua,
+            "viewport": {"width": 1280, "height": 720},
+            "extra_http_headers": {
+                "Accept-Language": "ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7"
+            }
+        }
 
-    async def run_test(self, headless: bool = True):
+    async def run_test(self, target_urls, headless=True):
+        """Main execution with Parallelism"""
         async with async_playwright() as p:
             browser = await p.chromium.launch(
                 headless=headless,
@@ -83,300 +90,245 @@ class NaverLandPlaywright:
                     "--disable-blink-features=AutomationControlled",
                     "--no-sandbox",
                     "--disable-setuid-sandbox",
-                ],
+                ]
             )
-            context = await browser.new_context(
-                viewport={"width": 390, "height": 844},
-                user_agent="Mozilla/5.0 (iPhone; CPU iPhone OS 16_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.6 Mobile/15E148 Safari/604.1",
-                locale="ko-KR",
-                timezone_id="Asia/Seoul",
-            )
-            page = await context.new_page()
-
-            await page.add_init_script("""
-                Object.defineProperty(navigator, 'webdriver', {
-                    get: () => undefined
-                });
-            """)
-
-            # ---------------------------
-            # 1. Warm-up
-            # ---------------------------
-            try:
-                await page.goto(
-                    "https://m.land.naver.com/", wait_until="networkidle", timeout=30000
-                )
-            except:
-                logging.warning("Warm-up navigation timed out, proceeding...")
-
-            # ---------------------------
-            # 2. Iterate Regions
-            # ---------------------------
-            for target_url in TARGET_URLS:
-                logging.info(f"Visiting Region URL: {target_url}")
-                try:
-                    await page.goto(
-                        target_url, wait_until="domcontentloaded", timeout=45000
+            
+            # Semaphore for limiting concurrency
+            sem = asyncio.Semaphore(MAX_CONCURRENT_PAGES)
+            
+            async def worker(item):
+                dong_name, url = item
+                async with sem:
+                    # New Context per URL (Isolated cookies, Random UA)
+                    context = await browser.new_context(
+                        **self.get_context_options()
                     )
-                    await page.wait_for_timeout(3000)
-                except Exception as e:
-                    logging.error(f"Failed to load region page: {e}")
-                    continue
-
-                # ---------------------------
-                # 3. Load All Complexes (Pagination)
-                # ---------------------------
-                logging.info("Loading full list by clicking 'More' button...")
-                while True:
+                    
+                    # Stealh scripts
+                    page = await context.new_page()
+                    await page.add_init_script("""
+                        Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
+                    """)
+                    
                     try:
-                        # Find "더보기" button
-                        more_btn = page.locator("button", has_text="더보기")
-
-                        # Check visibility with a short timeout
-                        if await more_btn.is_visible(timeout=2000):
-                            logging.info("Clicking 'More' button...")
-                            await more_btn.click()
-                            # Wait for list to update - simple pause or wait for network
-                            await page.wait_for_timeout(500)
-                        else:
-                            logging.info(
-                                "'More' button not found or not visible. Assuming full list loaded."
-                            )
-                            break
+                        logging.info(f"🚀 Processing: {dong_name} ({url})")
+                        await asyncio.sleep(random.uniform(0.5, 1.5)) # Random start delay
+                        await self.process_region_tab(page, url, dong_name)
                     except Exception as e:
-                        logging.warning(f"Error checking/clicking 'More' button: {e}")
-                        break
+                        logging.error(f"❌ Failed processing {url}: {e}")
+                    finally:
+                        await context.close()
 
-                # ---------------------------
-                # Extract & Filter in List
-                # ---------------------------
-                logging.info("Extracting and filtering complexes...")
-
-                try:
-                    await page.wait_for_selector(
-                        "li[class*='ComplexItem_article']", timeout=15000
-                    )
-                except:
-                    logging.warning("Timeout waiting for complex list.")
-
-                complex_items = await page.query_selector_all(
-                    "li[class*='ComplexItem_article']"
-                )
-                filtered_cids = []
-
-                for item in complex_items:
-                    try:
-                        # Link & CID
-                        link_el = await item.query_selector(
-                            "a[class*='ComplexItem_link']"
-                        )
-                        if not link_el:
-                            continue
-                        href = await link_el.get_attribute("href")
-                        match = re.search(r"/complexes/(\d+)", href)
-                        if not match:
-                            continue
-                        cid = match.group(1)
-
-                        # Name
-                        name_el = await item.query_selector(
-                            "strong[class*='ComplexItem_name']"
-                        )
-                        name = (
-                            await name_el.inner_text() if name_el else f"Complex_{cid}"
-                        )
-
-                        # Type Filter (Strict Apartment)
-                        is_apt = False
-                        badge_el = await item.query_selector(
-                            "span[class*='TitleBadge_article']"
-                        )
-                        if badge_el:
-                            badge_text = await badge_el.inner_text()
-                            if "아파트" in badge_text and "오피스텔" not in badge_text:
-                                is_apt = True
-
-                        if not is_apt:
-                            continue
-
-                        # Household Filter
-                        info_items = await item.query_selector_all(
-                            "li[class*='ComplexItem_item-info']"
-                        )
-                        households = 0
-                        for info in info_items:
-                            text = await info.inner_text()
-                            if "세대" in text:
-                                h_match = re.search(r"(\d[\d,]*)\s*세대", text)
-                                if h_match:
-                                    households = int(h_match.group(1).replace(",", ""))
-                                    break
-
-                        if households < MIN_HOUSEHOLDS:
-                            continue
-
-                        self.complexes[cid] = {"name": name, "households": households}
-                        filtered_cids.append(cid)
-                        logging.info(f"Found Target: {name} ({cid}) - {households}세대")
-
-                    except Exception as e:
-                        continue
-
-                logging.info(
-                    f"Total targets found in this region: {len(filtered_cids)}"
-                )
-                if not filtered_cids:
-                    continue
-
-                # ---------------------------
-                # Setup API Interception
-                # ---------------------------
-                if self.handle_response_wrapper:
-                    try:
-                        page.remove_listener("response", self.handle_response_wrapper)
-                    except:
-                        pass
-
-                async def handle_response(response):
-                    try:
-                        url = response.url
-                        if "front-api/v1" in url and response.status == 200:
-                            is_target = False
-                            if "article/list" in url:
-                                is_target = True
-                            if "realtor/advertisement" in url:
-                                is_target = True
-
-                            if is_target:
-                                data = await response.json()
-                                if "result" in data:
-                                    res = data["result"]
-                                    items = []
-
-                                    if isinstance(res, list):
-                                        items = res
-                                    elif isinstance(res, dict) and "list" in res:
-                                        items = res["list"]
-
-                                    if items:
-                                        cid = None
-
-                                        # 1. Try URL (GET)
-                                        match = re.search(r"complexNumber=(\d+)", url)
-                                        if match:
-                                            cid = match.group(1)
-
-                                        # 2. Try POST Data
-                                        if not cid:
-                                            try:
-                                                req = response.request
-                                                post_data = req.post_data_json
-                                                if (
-                                                    post_data
-                                                    and "complexNumber" in post_data
-                                                ):
-                                                    cid = str(
-                                                        post_data["complexNumber"]
-                                                    )
-
-                                                if not cid and req.post_data:
-                                                    pmatch = re.search(
-                                                        r"complexNumber=(\d+)",
-                                                        req.post_data,
-                                                    )
-                                                    if pmatch:
-                                                        cid = pmatch.group(1)
-                                            except:
-                                                pass
-
-                                        if cid:
-                                            if cid not in self.captured_articles: self.captured_articles[cid] = []
-                                            # Avoid duplicates if possible? checking ID might be expensive. 
-                                            # Just extend for now.
-                                            self.captured_articles[cid].extend(items)
-                                            logging.info(
-                                                f"Captured {len(items)} items for {self.complexes.get(cid, cid)}..."
-                                            )
-                    except:
-                        pass
-
-                self.handle_response_wrapper = handle_response  # Store ref
-                page.on("response", self.handle_response_wrapper)
-
-                # ---------------------------
-                # Visit Filtered URLs (Sale & Jeonse)
-                # ---------------------------
-                for cid in filtered_cids:
-                    for t_type in ["A1", "B1"]:
-                        type_name = "매매" if t_type == "A1" else "전세"
-                        detail_url = f"https://fin.land.naver.com/complexes/{cid}?tab=article&tradeType={t_type}&articleTradeTypes={t_type}&articleSortingType=PRICE_ASC"
-                        logging.info(f"Visiting {self.complexes[cid]} ({type_name})...")
-
-                        try:
-                            await page.goto(
-                                detail_url, wait_until="domcontentloaded", timeout=45000
-                            )
-                        except Exception as e:
-                            logging.warning(f"Nav error {cid} ({t_type}): {e}")
-
-                        # Wait for initial load
-                        await page.wait_for_timeout(2000)
-
-                        # ---------------------------
-                        # Scroll to Load All Articles
-                        # ---------------------------
-                        logging.info(
-                            f"Scrolling to load all articles for {type_name}..."
-                        )
-                        last_height = await page.evaluate("document.body.scrollHeight")
-                        no_change_count = 0
-                        scroll_count = 0
-
-                        while True:
-                            # Safety break
-                            if scroll_count > 50:
-                                logging.warning("Max scroll attempts reached. Breaking.")
-                                break
-                            
-                            scroll_count += 1
-                            
-                            try:
-                                # Scroll to bottom
-                                await page.evaluate(
-                                    "window.scrollTo(0, document.body.scrollHeight)"
-                                )
-    
-                                # Wait for potential load
-                                await page.wait_for_timeout(1500)
-    
-                                new_height = await page.evaluate(
-                                    "document.body.scrollHeight"
-                                )
-                            except:
-                                break
-
-                            if new_height == last_height:
-                                no_change_count += 1
-                                if (
-                                    no_change_count >= 2
-                                ):  # Stop if no change for 2 iterations
-                                    break
-                            else:
-                                no_change_count = 0  # Reset if height changed
-                                # logging.info("Scroll triggered new content...")
-    
-                            last_height = new_height
+            tasks = [worker(item) for item in target_urls]
+            if tasks:
+                await asyncio.gather(*tasks)
+            else:
+                logging.warning("No URLs to crawl.")
 
             await browser.close()
+
+    async def process_region_tab(self, page, target_url, dong_name):
+        """Logic for processing a single region tab (was inside the loop previously)"""
+        try:
+            # 1. Go to Region
+            await page.goto(target_url, wait_until="domcontentloaded", timeout=45000)
+            await page.wait_for_timeout(random.uniform(2000, 3000))
+        except Exception as e:
+            logging.error(f"Failed to load region page {target_url}: {e}")
+            return
+
+        # 2. Load All Complexes (Pagination)
+        logging.info("Loading full list...")
+        while True:
+            try:
+                more_btn = page.locator(NaverLandSelectors.MORE_BUTTON)
+                if await more_btn.is_visible(timeout=2000):
+                    await more_btn.click()
+                    await page.wait_for_timeout(random.uniform(300, 700)) # Random click interval
+                else:
+                    break
+            except:
+                break
+
+        # 3. Extract Complexes
+        try:
+            await page.wait_for_selector(NaverLandSelectors.COMPLEX_ITEM, timeout=10000)
+        except:
+            logging.warning("Timeout waiting for complex list (or empty).")
+
+        complex_items = await page.query_selector_all(NaverLandSelectors.COMPLEX_ITEM)
+        filtered_cids = []
+
+        for item in complex_items:
+            try:
+                # Link & CID
+                link_el = await item.query_selector(NaverLandSelectors.COMPLEX_LINK)
+                if not link_el: continue
+                href = await link_el.get_attribute("href")
+                match = re.search(r"/complexes/(\d+)", href)
+                if not match: continue
+                cid = match.group(1)
+
+                # Name
+                name_el = await item.query_selector(NaverLandSelectors.COMPLEX_NAME)
+                name = await name_el.inner_text() if name_el else f"Complex_{cid}"
+
+                # Filters
+                is_apt = False
+                badge_el = await item.query_selector(NaverLandSelectors.COMPLEX_BADGE)
+                if badge_el:
+                    badge_text = await badge_el.inner_text()
+                    if "아파트" in badge_text and "오피스텔" not in badge_text:
+                        is_apt = True
+                
+                if not is_apt: continue
+
+                # Households
+                households = 0
+                info_items = await item.query_selector_all(NaverLandSelectors.COMPLEX_INFO)
+                for info in info_items:
+                    text = await info.inner_text()
+                    if "세대" in text:
+                        h_match = re.search(r"(\d[\d,]*)\s*세대", text)
+                        if h_match:
+                            households = int(h_match.group(1).replace(",", ""))
+                            break
+                
+                if households < MIN_HOUSEHOLDS: continue
+
+                self.complexes[cid] = {
+                    "name": name, 
+                    "households": households,
+                    "_dong_name": dong_name
+                }
+                filtered_cids.append(cid)
+            except Exception as e:
+                continue
+        
+        logging.info(f"Target Count in Region: {len(filtered_cids)}")
+        if not filtered_cids: return
+
+        # ========================================================
+        # [OPTIMIZATION] Parallel Fetch of Details (Complex & Pyeong)
+        # ========================================================
+        async def fetch_one_complex(cid):
+            # 1. Complex Detail
+            if cid not in self.complexes or "totalHouseholdNumber" not in self.complexes[cid]:
+                try:
+                    api_url = f"https://fin.land.naver.com/front-api/v1/complex?complexNumber={cid}"
+                    # Use page.request for sharing context/cookies
+                    api_res = await page.request.get(api_url)
+                    if api_res.status == 200:
+                        data = await api_res.json()
+                        if "result" in data:
+                            new_data = data["result"]
+                            # Preserve custom fields from loop
+                            if cid in self.complexes and isinstance(self.complexes[cid], dict):
+                                new_data["_dong_name"] = self.complexes[cid].get("_dong_name")
+                            self.complexes[cid] = new_data
+                except: pass
+
+            # 2. Pyeong List
+            if cid in self.complexes and "pyeongs" not in self.complexes[cid]:
+                try:
+                    pyeong_url = f"https://fin.land.naver.com/front-api/v1/complex/pyeongList?complexNumber={cid}"
+                    p_res = await page.request.get(pyeong_url)
+                    if p_res.status == 200:
+                        p_data = await p_res.json()
+                        if "result" in p_data:
+                            self.complexes[cid]["pyeongs"] = p_data["result"]
+                except: pass
+
+        logging.info(f"⚡ Pre-fetching details for {len(filtered_cids)} complexes concurrently...")
+        
+        # Limit concurrency to 20 to be polite/safe
+        sem_api = asyncio.Semaphore(20)
+        
+        async def sem_task(cid):
+            async with sem_api:
+                await fetch_one_complex(cid)
+
+        await asyncio.gather(*[sem_task(c) for c in filtered_cids])
+        logging.info("✅ Pre-fetch complete.")
+        # ========================================================
+
+        # 4. API Interception Setup (Context-specific)
+        async def handle_response(response):
+            try:
+                url = response.url
+                if "front-api/v1" in url and response.status == 200:
+                    # Filter out the detail APIs we just called manually to avoid noise
+                    if "pyeongList" in url or "/complex?" in url: return
+
+                    # DEBUG_API: {url}
+                    data = await response.json()
+                    
+                    # 2. Article List API
+                    items = []
+                    if "result" in data:
+                        res = data["result"]
+                        if isinstance(res, list): items = res
+                        elif isinstance(res, dict) and "list" in res: items = res["list"]
+                    
+                    if items:
+                        # Extract CID from URL or POST data
+                        found_cid = None
+                        match = re.search(r"complexNumber=(\d+)", url)
+                        if match: found_cid = match.group(1)
+                        
+                        if not found_cid:
+                            try:
+                                post = response.request.post_data_json
+                                if post and "complexNumber" in post: found_cid = str(post["complexNumber"])
+                            except: pass
+
+                        if found_cid:
+                            if found_cid not in self.captured_articles: self.captured_articles[found_cid] = []
+                            self.captured_articles[found_cid].extend(items)
+            except: pass
+
+        page.on("response", handle_response)
+
+        # 5. Visit Details (Now faster because details are cached)
+        # We still visit to trigger Article List interception
+        for cid in filtered_cids:
+            # Check if we already have detailed info (we should)
+            # Just logs progress
+            
+            for t_type in ["A1", "B1"]: # Trade, Jeonse
+                detail_url = f"https://fin.land.naver.com/complexes/{cid}?tab=article&tradeType={t_type}&articleTradeTypes={t_type}&articleSortingType=PRICE_ASC"
+                
+                try:
+                    await page.goto(detail_url, wait_until="domcontentloaded", timeout=30000)
+                    
+                    # Wait less time now since we don't need to fetch complex info
+                    await page.wait_for_timeout(random.uniform(500, 1000))
+
+                    # Scroll
+                    last_height = await page.evaluate("document.body.scrollHeight")
+                    no_change = 0
+                    for _ in range(30): # Reduced scroll max
+                        await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+                        await page.wait_for_timeout(random.uniform(300, 600))
+                        new_height = await page.evaluate("document.body.scrollHeight")
+                        if new_height == last_height:
+                            no_change += 1
+                            if no_change >= 2: break
+                        else:
+                            no_change = 0
+                        last_height = new_height
+                except Exception as e:
+                    logging.warning(f"Nav error {cid}: {e}")
 
     def process_data(self):
         processor = DataProcessor()
         results = []
 
-        logging.info(f"Processing data for {len(self.captured_articles)} complexes...")
+        logging.info(f"Aggregating data for {len(self.captured_articles)} complexes...")
 
         for cid, articles_or_groups in self.captured_articles.items():
             complex_info = self.complexes.get(cid, "")
+            
             cname = str(cid)
             household_count_from_list = 0
             
@@ -385,395 +337,374 @@ class NaverLandPlaywright:
                 household_count_from_list = complex_info.get("households", 0)
             elif complex_info:
                 cname = str(complex_info)
-
+            
+            # Flatten
             flat_articles = []
-
             for item in articles_or_groups:
-                if "articleInfoList" in item:
-                    flat_articles.extend(item["articleInfoList"])
-                elif "representativeArticleInfo" in item:
-                    flat_articles.append(item["representativeArticleInfo"])
-                elif (
-                    "articleName" in item
-                    or "priceInfo" in item
-                    or "articleNo" in item
-                    or "articleNumber" in item
-                ):
-                    flat_articles.append(item)
-
-            if not flat_articles:
-                continue
-
+                if "articleInfoList" in item: flat_articles.extend(item["articleInfoList"])
+                elif "representativeArticleInfo" in item: flat_articles.append(item["representativeArticleInfo"])
+                else: flat_articles.append(item)
+            
+            if not flat_articles: continue
+            
+            # Group by Pyeong
             groups = {}
             for art in flat_articles:
+                # [Same filtering logic as before...]
                 space = art.get("spaceInfo", {})
-                if not space and "supplySpaceName" in art:
-                    space = art
-
-                s_name = space.get("supplySpaceName", "")
-                e_name = space.get("exclusiveSpaceName", "")
-                if not s_name:
-                    s_name = str(space.get("supplySpace", ""))
-                if not e_name:
-                    e_name = str(space.get("exclusiveSpace", ""))
-
+                if not space and "supplySpaceName" in art: space = art
+                s_name = space.get("supplySpaceName", str(space.get("supplySpace", "")))
+                e_name = space.get("exclusiveSpaceName", str(space.get("exclusiveSpace", "")))
                 ptp_key = f"{s_name}_{e_name}"
-
-                if ptp_key not in groups:
-                    groups[ptp_key] = {"trade": [], "rent": [], "info": art}
-
+                
+                if ptp_key not in groups: groups[ptp_key] = {"trade": [], "rent": [], "info": art}
+                
                 t_type = art.get("tradeType", "")
-
-                # Floor Extraction
+                
+                # Floor extraction (Simplified Copy)
+                floor_str = "-"
                 floor_info = art.get("floorDetailInfo")
-                floor_str = ""
-
-                # If not at top level, check inside articleDetail
                 if not floor_info:
-                    detail = art.get("articleDetail", {})
-                    floor_info = detail.get("floorDetailInfo")
-                    
-                    # If still no detail dict, check for simple string in detail
-                    if not floor_info:
-                         floor_raw = detail.get("floorInfo", "")
-                         if floor_raw:
-                             floor_str = floor_raw
-
+                     detail = art.get("articleDetail", {})
+                     floor_info = detail.get("floorDetailInfo")
+                     if not floor_info: floor_str = detail.get("floorInfo", "-")
+                
                 if floor_info:
-                    target = floor_info.get("targetFloor", "")
-                    total = floor_info.get("totalFloor", "")
-                    floor_str = f"{target}/{total}"
-                elif not floor_str:
-                    # Fallback to top-level simple keys
-                    target = art.get("floorLayerName", "")
-                    total = art.get("totalFloor", "")
-                    if target or total:
-                        floor_str = f"{target}/{total}"
-                    else:
-                        floor_str = "-"
+                    floor_str = f"{floor_info.get('targetFloor','')}/{floor_info.get('totalFloor','')}"
 
-                # Price Extraction
+                art["_mapped_price"] = 0
+                # Price extraction logic
                 price_info = art.get("priceInfo", {})
                 price = 0
                 if t_type in ["A1", "매매"]:
-                    price = (
-                        price_info.get("dealPrice", 0)
-                        if price_info
-                        else art.get("dealPrice", 0)
-                    )
+                     price = price_info.get("dealPrice", 0) if price_info else art.get("dealPrice", 0)
                 elif t_type in ["B1", "전세"]:
-                    # Jeonse uses 'warrantyPrice' usually
-                    if price_info:
-                        price = price_info.get("warrantyPrice", 0)
-                        if price == 0:
-                             price = price_info.get("leasePrice", 0)
-                    else:
-                        price = art.get("warrantyPrice") or art.get("leasePrice", 0)
-
+                     price = price_info.get("warrantyPrice", 0) if price_info else art.get("warrantyPrice", 0)
+                
                 art["_mapped_price"] = price
                 art["_mapped_floor"] = floor_str
-
-                # Article No for deduplication
-                article_no = art.get("articleNo") or art.get("articleNumber")
-
-                if t_type == "A1" or t_type == "매매":
-                    # Simple deduplication within group
-                    if not any(
-                        x.get("articleNo") == article_no
-                        for x in groups[ptp_key]["trade"]
-                    ):
-                        groups[ptp_key]["trade"].append(art)
-                elif t_type == "B1" or t_type == "전세":
-                    # No floor filter for Jeonse as per user request
-                    if not any(
-                        x.get("articleNo") == article_no
-                        for x in groups[ptp_key]["rent"]
-                    ):
-                        groups[ptp_key]["rent"].append(art)
+                
+                # Append to processed group
+                if t_type in ["A1", "매매"]: groups[ptp_key]["trade"].append(art)
+                elif t_type in ["B1", "전세"]: groups[ptp_key]["rent"].append(art)
+            
+            def get_stats(items, is_trade=True):
+                if not items: return 0, 0, 0, 0, 0, 0 # min_std, min_spc, min_total, max, avg, count
+                items.sort(key=lambda x: int(x.get("_mapped_price", 0)))
+                
+                std = [x for x in items if not processor.is_low_floor(x.get("_mapped_floor", ""))]
+                spc = [x for x in items if processor.is_low_floor(x.get("_mapped_floor", ""))]
+                
+                min_std = std[0]["_mapped_price"] if std else 0
+                min_spc = spc[0]["_mapped_price"] if spc else 0
+                min_total = items[0]["_mapped_price"] # Absolute min
+                max_val = items[-1]["_mapped_price"]
+                avg = sum(x["_mapped_price"] for x in items) / len(items)
+                return min_std, min_spc, min_total, max_val, avg, len(items)
 
             for ptp_key, g in groups.items():
-                if not g["trade"] and not g["rent"]:
-                    continue
+                    if not g["trade"] and not g["rent"]: continue
+                    
+                    tm_std, tm_spc, tm_min_total, tm_max, tm_avg, tm_cnt = get_stats(g["trade"])
+                    # Rent (Jeonse): Use min_total for the single "Jeonse Min" column
+                    _, _, rm_min_total, rm_max, rm_avg, rm_cnt = get_stats(g["rent"])
+                    rm_min = rm_min_total
+                    
+                    # Gap & Ratio Logic
+                    base_price = tm_std if tm_std > 0 else tm_spc
+                    
+                    gap = ""
+                    jeonse_ratio = ""
+                    
+                    if base_price > 0 and rm_min > 0:
+                        gap_val = base_price - rm_min
+                        gap = gap_val # Will be formatted later
+                        jeonse_ratio = (rm_min / base_price * 100)
+                    
+                    # Use 'complex_info' (Full Detail) for complex data
+                    # Use 'g["info"]' (Article) for type/space data
+                    info = g["info"]
+                    space = info.get("spaceInfo", {}) or info
+                    
+                    # Correct Keys for Mobile API (fin.land)
+                    # Coordinates
+                    coords = complex_info.get("coordinates") or {}
+                    lat = coords.get("yCoordinate") or ""
+                    long = coords.get("xCoordinate") or ""
 
-                # --- Analysis Logic ---
-                # Trade Analysis
-                trade_all = g["trade"]
-                trade_standard = []
-                trade_special = []  # Low, Top, 1-3
+                    # Parking
+                    pkg = complex_info.get("parkingInfo") or {}
+                    pkg_cnt_hh = pkg.get("parkingCountPerHousehold") or ""
+                    
+                    # Heating
+                    heat = complex_info.get("heatingAndCoolingInfo") or {}
+                    heat_method = heat.get("heatingAndCoolingSystemType") or "" 
+                    heat_fuel = heat.get("heatingEnergyType") or "" 
+                    
+                    # Additional Space Info (Hallway, Room/Bath)
+                    # Match 'space' (from article) with 'areas' (from API)
+                    hallway_type = ""
+                    room_bath_str = ""
+                    
+                    target_space = float(space.get("supplySpace", 0))
+                    # Old 'areas' block removed
+                    
 
-                for item in trade_all:
-                     floor_s = item.get("_mapped_floor", "-")
-                     if processor.is_low_or_top_floor(floor_s):
-                         trade_special.append(item)
-                     else:
-                         trade_standard.append(item)
-                
-                # Sort
-                trade_standard.sort(key=lambda x: int(x.get("_mapped_price", 999999999)))
-                trade_special.sort(key=lambda x: int(x.get("_mapped_price", 999999999)))
-                trade_all.sort(key=lambda x: int(x.get("_mapped_price", 999999999)))
+                    # MATCHING LOGIC (Using Pyeongs)
+                    matched_pyeong = None
+                    pyeongs = complex_info.get("pyeongs", [])
+                    
+                    target_space = float(space.get("supplySpace", 0))
+                    
+                    for p in pyeongs:
+                        p_area = float(p.get("supplyArea", 0)) # Corrected Key
+                        # Match logic
+                        if abs(p_area - target_space) < 0.5:
+                            matched_pyeong = p
+                            break
+                    
+                    if matched_pyeong:
+                        # Hallway Type: 10=Stairs, 20=Corridor, 30=Mixed
+                        e_type = str(matched_pyeong.get("entranceType", ""))
+                        if e_type == "10": hallway_type = "계단식"
+                        elif e_type == "20": hallway_type = "복도식"
+                        elif e_type == "30": hallway_type = "복합식"
+                        else: hallway_type = e_type
+                        
+                        r = matched_pyeong.get("roomCount", "")
+                        b = matched_pyeong.get("bathRoomCount", "")
+                        if r and b: room_bath_str = f"{r}/{b}개"
 
-                # Stats: Min Price (Standard)
-                t_min_std = 0
-                if trade_standard:
-                    t_min_std = trade_standard[0]["_mapped_price"]
-                
-                # Stats: Min Price (Low/Top)
-                t_min_spc = 0
-                if trade_special:
-                    t_min_spc = trade_special[0]["_mapped_price"]
-                
-                # Stats: Max Price (All)
-                t_max = 0
-                if trade_all:
-                    t_max = trade_all[-1]["_mapped_price"]
-                
-                # Stats: Average Price (All)
-                t_avg = 0
-                if trade_all:
-                    total_price = sum(x["_mapped_price"] for x in trade_all)
-                    t_avg = total_price / len(trade_all)
-                
-                # Stats: Total Count
-                t_count = len(trade_all)
+                    # FAR/BCR
+                    b_ratio_info = complex_info.get("buildingRatioInfo") or {}
+                    far = b_ratio_info.get("floorAreaRatio") or "" 
+                    bcr = b_ratio_info.get("buildingCoverageRatio") or "" 
+                    
+                    # Constructor
+                    const_co = complex_info.get("constructionCompany", "")
 
-                # Use Min Price (Standard) as baseline for Gap if available, else Min Price (All)
-                base_price_for_gap = t_min_std if t_min_std > 0 else (t_min_spc if t_min_spc > 0 else 0)
+                    # Helper for Man-won formatting (Empty if 0)
+                    def fmt(val):
+                        if not val and val != 0: return "" # None/Empty
+                        if val == 0: return "" # User requested empty for 0
+                        if isinstance(val, str): return val
+                        return f"{int(val / 10000):,}"
 
-                # Jeonse Info (unchanged logic for now, just sort)
-                g["rent"].sort(key=lambda x: int(x.get("_mapped_price", 999999999)))
-                r_min = 0
-                r_max = 0
-                r_avg = 0
-                r_floor = "-"
-                r_count = len(g["rent"])
-                if g["rent"]:
-                    best_rent = g["rent"][0]
-                    r_min = best_rent["_mapped_price"]
-                    r_max = g["rent"][-1]["_mapped_price"]
-                    r_avg = sum(x["_mapped_price"] for x in g["rent"]) / r_count
-                    r_floor = best_rent.get("_mapped_floor", "-")
+                    # Address Logic
+                    # API 'address' might be a string or dict.
+                    # If it's a string, we can't get region1DepthName.
+                    # We utilize the 'region_name' passed from main if available.
+                    addr = complex_info.get("address", {})
+                    
+                    sido = ""
+                    gungu = ""
+                    # Use the _dong_name we stored from the URL list!
+                    # This is the 100% correct source from naver_region_codes.json
+                    dong = complex_info.get("_dong_name", "") 
+                    if not dong: dong = complex_info.get("bjdName", "")
+                    
+                    if isinstance(addr, dict):
+                        sido = addr.get("region1DepthName", "")
+                        gungu = addr.get("region2DepthName", "")
+                        if not dong: dong = addr.get("region3DepthName", "")
+                    elif isinstance(addr, str):
+                        # Simple parsing if it's a string like "서울시 강남구 개포동 123"
+                        parts = addr.split()
+                        if len(parts) >= 1: sido = parts[0]
+                        if len(parts) >= 2: gungu = parts[1]
+                        if len(parts) >= 3 and not dong: dong = parts[2]
 
-                # Gap & Ratio
-                gap = 0
-                ratio = 0
-                if base_price_for_gap > 0 and r_min > 0:
-                    gap = base_price_for_gap - r_min
-                    # gap_str = processor.format_price(gap)
-                    ratio = (r_min / base_price_for_gap) * 100
-                    # ratio_str = f"{ratio:.1f}%"
+                    # Fallback to crawler's current region if empty
+                    if not sido and hasattr(self, 'region_name'):
+                        parts = self.region_name.split()
+                        if len(parts) >= 1: sido = parts[0]
+                        if len(parts) >= 2: gungu = parts[1]
+                        if len(parts) >= 3 and not dong: dong = parts[2]
 
-                info = g["info"]
-                space = info.get("spaceInfo", {})
-                if not space:
-                    space = info
-
-                # Region Name Extraction
-                address = info.get("address", {})
-                city = address.get("city", "")
-                dist = address.get("division", "")
-                dong = address.get("sector", "")
-
-                # Building Info
-                building = info.get("buildingInfo", {})
-                completion_date = building.get("buildingConjunctionDate", "")
-                age = building.get("approvalElapsedYear", "")
-                total_households = household_count_from_list or building.get("totalHouseholdCount", 0)
-                
-                # Format Age: "YYYY (N년차)"
-                final_age = "-"
-                year_str = completion_date[:4] if completion_date and len(completion_date) >= 4 else ""
-                if year_str and age:
-                    final_age = f"{year_str} ({age}년차)"
-                elif age:
-                     final_age = f"{age}년차"
-                elif year_str:
-                     final_age = year_str
-
-                link_url = f"https://fin.land.naver.com/complexes/{cid}"
-
-                results.append(
-                    {
-                        "시/도": city,
-                        "시/군/구": dist,
+                    # Approval Date Check
+                    approval_date = complex_info.get("useApprovalDate", "") # Correct Key Found
+                    
+                    results.append({
+                        "시/도": sido, 
+                        "시/군/구": gungu,
                         "읍/면/동": dong,
                         "아파트명": cname,
-                        "총세대수": total_households,
-                        "준공일": completion_date,
-                        "연식": final_age,
-                        "평형": f"{space.get('supplySpace')}/{space.get('exclusiveSpace')}m² ({space.get('supplySpaceName')})",
+                        "준공일": approval_date, 
+                        "총세대수": complex_info.get("totalHouseholdNumber", 0),
+                        "타입": space.get('supplySpaceName', 'Unknown'),
                         "공급면적": float(space.get("supplySpace", 0)),
                         "전용면적": float(space.get("exclusiveSpace", 0)),
-                        "매매 최저가 (일반)": t_min_std,
-                        "매매 최저가 (저층/탑층)": t_min_spc,
-                        "매매 최고가": t_max,
-                        "매매 평균가": int(t_avg),
-                        "매매 매물수 (전체)": t_count,
-                        "전세 최저가": r_min,
-                        "전세 최고가": r_max,
-                        "전세 평균가": int(r_avg),
-                        "전세 층수": r_floor,
-                        "전세 매물수": r_count,
-                        "갭": gap, # Raw Gap
-                        "전세가율": ratio, # Raw Ratio (Already * 100 in calc above)
-                        "링크": link_url,
-                    }
-                )
+                        "현관구조": hallway_type,   # New
+                        "방/욕실": room_bath_str,   # New
+                        "매매 최저가 (일반)": fmt(tm_std) if tm_cnt > 0 else "",
+                        "매매 최저가 (저층)": fmt(tm_spc) if tm_cnt > 0 else "",
+                        "매매 최고가": fmt(tm_max) if tm_cnt > 0 else "",
+                        "매매 평균가": fmt(int(tm_avg)) if tm_cnt > 0 else "",
+                        "매매 매물수 (전체)": tm_cnt if tm_cnt > 0 else "",
+                        "전세 최저가": fmt(rm_min) if rm_cnt > 0 else "",
+                        "전세 최고가": fmt(rm_max) if rm_cnt > 0 else "",
+                        "전세 평균가": fmt(int(rm_avg)) if rm_cnt > 0 else "",
+                        "전세 매물수": rm_cnt if rm_cnt > 0 else "",
+                        "갭": fmt(gap) if gap != "" else "",
+                        "전세가율": f"{jeonse_ratio:.1f}%" if jeonse_ratio != "" else "",
+                        "링크": f'=HYPERLINK("https://fin.land.naver.com/complexes/{cid}", "바로가기")',
+                        # Moved to End as requested
+                        "총동수": complex_info.get("dongCount", 0), 
+                        "건설사": const_co,
+                        "난방방식": heat_method,
+                        "난방연료": heat_fuel,
+                        "세대당주차대수": pkg_cnt_hh,
+                        "용적률": far,
+                        "건폐율": bcr,
+                        "위도": lat,
+                        "경도": long
+                    })
 
         return pd.DataFrame(results)
 
-    # Helper to avoid error on first remove_listener logic?
-    # Simply initialize wrapper as dummy
-    handle_response_wrapper = lambda s: None
+# Helper Functions
+def get_all_leaf_items(node, current_name=""):
+    items = []
+    if "children" in node and node["children"]:
+        for k, v in node["children"].items():
+            # If current_name is empty, just use k. If not, maybe append? 
+            # Actually we just want the LEAF name (Dong name).
+            # The structure is usually City -> Gu -> Dong. 
+            # Keep k as the name if it's a leaf.
+            items.extend(get_all_leaf_items(v, k))
+    else:
+        if "url" in node:
+            # It's a leaf. current_name should be the Dong name passed from parent loop.
+            items.append((current_name, node["url"]))
+    return items
 
+def get_region_urls(region_list):
+    json_path = "naver_region_codes.json"
+    if not os.path.exists(json_path):
+        print(f"❌ {json_path} not found.")
+        return []
+    try:
+        with open(json_path, "r", encoding="utf-8") as f: data = json.load(f)
+    except: return []
+
+    final_items = [] # List of (name, url)
+    for query in region_list:
+        parts = query.split()
+        curr = data
+        found = True
+        last_key = ""
+        for part in parts:
+            if part in curr:
+                last_key = part
+                curr = curr[part].get("children", {}) if "children" in curr[part] else curr[part]
+            else:
+                match = next((k for k in curr if part in k), None)
+                if match:
+                    last_key = match
+                    if "children" in curr[match]: curr = curr[match]["children"]
+                    # Else it's leaf?
+                else:
+                    found = False; break
+        
+        if found:
+            # curr is now either a dict of children (if we stopped at Gu) or a Leaf Node (if we specified Dong)
+            # If it has "url" and no "children", it's a leaf.
+            if "url" in curr and "children" not in curr:
+                 final_items.append((last_key, curr["url"]))
+            else:
+                 # It's a dict of children (e.g. Gu node's children dict)
+                 # curr keys are Dong names
+                 for k, v in curr.items():
+                     final_items.extend(get_all_leaf_items(v, k))
+                 
+    return final_items # Returns list of (dong_name, url)
+
+def get_subregions(region_name):
+    """Get list of immediate child regions (e.g., '서울시' -> ['강남구', '강동구', ...])"""
+    json_path = "naver_region_codes.json"
+    try:
+        with open(json_path, "r", encoding="utf-8") as f: data = json.load(f)
+        if region_name in data:
+            return list(data[region_name].get("children", {}).keys())
+    except: pass
+    return []
 
 async def main():
-    crawler = NaverLandPlaywright()
-    print("Playwright 크롤러 시작... (다중 지역 지원)")
-    print(f"대상 지역 수: {len(TARGET_URLS)}")
-
-    await crawler.run_test(headless=True)
-
-    df = crawler.process_data()
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    filename = f"naver_land_result_{timestamp}.xlsx"
-
-    if not df.empty:
-        # --- 1. Create Summary DataFrame ---
-        # Group by complex and LOOSE Exclusive Space
-        # User requested "Similar exclusive space should be merged". 
-        # "Difference within 3". 
-        # Using a bin size of 2 on Exclusive Space.
-        if "전용면적" in df.columns:
-             df["PyeongGroup"] = df["전용면적"].agg(lambda x: int(x / 2))
+    # global TARGET_URLS (Removed)
+    
+    # 1. Identify Processing Plan
+    regions_to_process = []
+    
+    for target in TARGET_REGIONS:
+        subregions = get_subregions(target)
+        if subregions:
+            print(f"🏙️ '{target}' Detected! Splitting into {len(subregions)} sub-regions...")
+            for sub in subregions:
+                # Construct sub-region name (e.g., "서울시 강남구", "경기도 수원시")
+                # Wait, naver_region_codes keys are top level.
+                # If target is "서울시", sub is "강남구".
+                # If target is "경기도", sub is "가평군", "수원시" etc.
+                # BUT "수원시" might need further splitting into Gu? (Suwon has Gus)
+                # Let's check get_region_urls logic. It traverses down to leaf.
+                # If we pass "경기도 수원시", get_region_urls will find all dongs in Suwon.
+                # This is a good batch size.
+                regions_to_process.append(f"{target} {sub}")
         else:
-             # Fallback if Exclusive Space missing (shouldn't happen)
-             df["PyeongGroup"] = df["공급면적"].agg(lambda x: int(x / 2))
-        
-        agg_rules = {
-            "총세대수": "first",
-            "연식": "first",
-            "매매 최저가 (일반)": "min",
-            "전세 최저가": "min",
-            "매매 매물수 (전체)": "sum",
-            "전세 매물수": "sum",
-            "공급면적": "mean",
-            "전용면적": "mean",
-            "링크": "first"
-        }
-        
-        # Valid numerical columns only for aggregation source
-        # Note: "매매 최저가 (일반)", "전세 최저가" might be 0 if not exist, need handling
-        numeric_cols_src = [
-            "총세대수", "공급면적", "전용면적",
-            "매매 최저가 (일반)", "전세 최저가",
-            "매매 매물수 (전체)", "전세 매물수"
-        ]
-         # Ensure numerics
-        for col in numeric_cols_src:
-             df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0)
+            regions_to_process.append(target)
+    
+    # If no regions but URLs exist (Legacy mode)
+    if not regions_to_process and TARGET_URLS:
+        regions_to_process = ["UNKNOWN_REGION"]
 
-        # Grouping
-        group_keys = ["시/도", "시/군/구", "읍/면/동", "아파트명", "PyeongGroup"]
-        # Include necessary static columns in keys or Agg? PyeongGroup is key. 
-        df_summary = df.groupby(group_keys).agg(agg_rules).reset_index()
+    if not regions_to_process:
+        print("❌ No items to process.")
+        return
+
+    print(f"📋 Processing Queue: {len(regions_to_process)} regions.")
+
+    # 2. Process Each Region/Gu
+    for region_name in regions_to_process:
+        # Resolve URLs for this specific region
+        current_urls = []
+        if region_name == "UNKNOWN_REGION":
+            current_urls = TARGET_URLS[:]
+        else:
+            print(f"\n Target: {region_name} ...")
+            current_urls = get_region_urls([region_name])
         
-        # --- Recalculate Derived Metrics on Aggregated Data ---
-        # Gap = Trade Min - Jeonse Min
-        def calc_gap(row):
-            t = row["매매 최저가 (일반)"]
-            j = row["전세 최저가"]
-            if t > 0 and j > 0:
-                return t - j
-            return 0
+        if not current_urls:
+            print(f"⚠️ No URLs found for {region_name}")
+            continue
             
-        # Ratio = Jeonse Min / Trade Min * 100
-        def calc_ratio(row):
-             t = row["매매 최저가 (일반)"]
-             j = row["전세 최저가"]
-             if t > 0 and j > 0:
-                 return (j / t) * 100
-             return 0
-
-        df_summary["갭"] = df_summary.apply(calc_gap, axis=1)
-        df_summary["전세가율(최저)"] = df_summary.apply(calc_ratio, axis=1)
+        # TARGET_URLS = current_urls (Removed)
         
-        # Date
-        today_str = datetime.now().strftime("%Y-%m-%d")
-        df_summary["수집일"] = today_str
+        # New Crawler Instance per Gu
+        crawler = NaverLandPlaywright()
+        crawler.region_name = region_name # Pass region name for fallback
+        print(f"🚀 Crawling {region_name} (URLs: {len(current_urls)})...")
+        await crawler.run_test(current_urls, headless=HEADLESS_MODE)
+        
+        # Process & Save
+        df = crawler.process_data()
+        
+        # Output Filename logic
+        output_dir = "results"
+        if not os.path.exists(output_dir): os.makedirs(output_dir)
+        
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        safe_name = region_name.replace(" ", "_").replace("/", "_")
+        filename = os.path.join(output_dir, f"{safe_name}_{timestamp}.xlsx")
 
-        # Format Columns
-        # Supply / Exclusive Pyeong
-        df_summary["공급평형"] = df_summary["공급면적"].apply(lambda x: f"{x:.2f}")
-        df_summary["전용평형"] = df_summary["전용면적"].apply(lambda x: f"{x:.2f}")
-
-        # Hyperlink
-        # Excel Hyperlink Formula: =HYPERLINK("url", "LinkText")
-        # Note: '링크' column currently has URL.
-        # df_summary["링크"] = df_summary["링크"].apply(lambda x: f'=HYPERLINK("{x}", "이동")')
-        # However, openpyxl writer usually handles simple strings. For formula, need specific care. 
-        # Or just leave as URL or cleaner TEXT. User said "Hyperlink rather than full URL". 
-        # Let's try to make it an Excel formula.
-        df_summary["링크"] = df_summary["링크"].apply(lambda x: f'=HYPERLINK("{x}", "이동")')
-
-        # --- 2. Formatting Helper ---
-        def format_cols(dataframe, is_summary=False):
-            # Price columns - JUST Comma format, no Korean text
-            # Convert to 'Man-won' unit: 10000 -> 1
-            p_cols = [
-                "매매 최저가 (일반)", "매매 최저가 (저층/탑층)", "매매 최고가", "매매 평균가", 
-                "전세 최저가", "전세 최고가", "전세 평균가", "갭"
-            ]
-            for c in p_cols:
-                if c in dataframe.columns:
-                     # Remove .0 for clean integers if possible
-                    dataframe[c] = dataframe[c].apply(lambda x: f"{int(x / 10000):,}" if x != 0 else "-")
+        if not df.empty:
+            a_cols = ["공급면적", "전용면적"]
+            for a in a_cols:
+                 if a in df.columns:
+                     df[a] = df[a].apply(lambda x: f"{int(round(float(x)))} ({int(round(float(x)/3.3058))})" if pd.notnull(x) else "")
             
-            # Ratios
-            r_cols = ["전세가율", "전세가율(최저)", "전세가율(평균)"]
-            for r in r_cols:
-                if r in dataframe.columns:
-                    dataframe[r] = dataframe[r].apply(lambda x: f"{x:.1f}%" if x > 0 else "-")
-            
-            return dataframe
-
-        # Apply formatting
-        df_detail_formatted = format_cols(df.copy())
-        df_summary_formatted = format_cols(df_summary.copy(), is_summary=True)
-
-        # Reorder / Rename Summary Columns
-        # Target: 시/도, 시/군/구, 읍/면/동, 아파트명, 총세대수, 공급평형, 전용평형, 연식, 
-        #         매매 최저가(일반), 전세 최저가, 매매 매물수, 전세 매물수, 갭, 전세가율(최저), 링크, 수집일
-        
-        rename_map = {
-            "매매 매물수 (전체)": "매매 매물수",
-            # Others match roughly or need direct selection
-        }
-        df_summary_formatted.rename(columns=rename_map, inplace=True)
-
-        final_cols = [
-            "시/도", "시/군/구", "읍/면/동", "아파트명", "총세대수", 
-            "공급평형", "전용평형", "연식", 
-            "매매 최저가 (일반)", "전세 최저가", 
-            "매매 매물수", "전세 매물수", 
-            "갭", "전세가율(최저)", 
-            "링크", "수집일"
-        ]
-        
-        # Select (ensure exist)
-        final_cols = [c for c in final_cols if c in df_summary_formatted.columns]
-        df_summary_formatted = df_summary_formatted[final_cols]
-
-        # Save to Multi-sheet Excel
-        with pd.ExcelWriter(filename, engine='openpyxl') as writer:
-            df_summary_formatted.to_excel(writer, sheet_name='평형별_요약', index=False)
-            df_detail_formatted.to_excel(writer, sheet_name='상세내역', index=False)
-
-        print(f"완료! 저장된 파일: {filename}")
-        print(f"총 {len(df)}개 데이터 수집됨.")
-    else:
-        print("데이터가 수집되지 않았습니다.")
-
+            df.to_excel(filename, index=False)
+            print(f"✅ Saved: {filename} ({len(df)} items)")
+        else:
+            print(f"⚠️ No data for {region_name}")
 
 if __name__ == "__main__":
     asyncio.run(main())
