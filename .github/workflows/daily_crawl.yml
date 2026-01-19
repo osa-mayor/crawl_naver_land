@@ -1,0 +1,71 @@
+name: Daily Land Crawler
+
+on:
+  schedule:
+    # 00:00 UTC = 09:00 KST (Every day)
+    - cron: '0 0 * * *'
+  workflow_dispatch:  # Manual trigger allowed
+
+jobs:
+  crawl-and-archive:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout Public Code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.10'
+
+      - name: Install Dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Install Playwright Browsers
+        run: |
+          playwright install chromium
+          playwright install-deps
+
+      - name: Run Crawler
+        run: python crawler.py
+
+      # --- Private DB Handling ---
+      
+      - name: Checkout Private DB Repo
+        uses: actions/checkout@v4
+        with:
+          # You must add PRIVATE_REPO_NAME (e.g. 'username/my-private-db')
+          repository: ${{ secrets.PRIVATE_REPO_NAME }}
+          # You must add PRIVATE_REPO_PAT (Personal Access Token)
+          token: ${{ secrets.PRIVATE_REPO_PAT }}
+          path: private_db
+          
+      - name: Move DB to Private Repo
+        run: |
+          if [ -f "real_estate.db" ]; then
+            echo "✅ DB Found. Moving to private repo..."
+            # Move the DB file to the private repository folder
+            mv -f real_estate.db private_db/
+          else
+            echo "⚠️ DB Not Found! Crawler might have failed or found no data."
+            exit 0
+          fi
+
+      - name: Commit and Push to Private Repo
+        run: |
+          cd private_db
+          git config user.name "GitHub Action"
+          git config user.email "action@github.com"
+          
+          git add real_estate.db
+          
+          # Check for changes before committing to avoid errors
+          if git diff --staged --quiet; then
+            echo "No changes to commit."
+          else
+            git commit -m "Update DB: $(date +'%Y-%m-%d')"
+            git push
+          fi

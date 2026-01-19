@@ -12,3 +12,8 @@ test_extraction.py
 crawler_excel.py
 summarizer.py
 fetch_region_codes.py
+
+# Private Data & Scripts
+real_estate.db
+export_db.py
+token.txt
