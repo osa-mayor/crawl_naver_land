@@ -15,7 +15,8 @@ from land_selectors import NaverLandSelectors
 # ==========================================
 # Target Regions (Search by Name using naver_region_codes.json)
 TARGET_REGIONS = [
-    "서울시"
+    "서울시", "경기도", "인천시", "부산시", "대구시", "광주시", "대전시", "울산시", "세종시",
+    "강원도", "충청북도", "충청남도", "전라북도", "전라남도", "경상북도", "경상남도", "제주도"
 ]
 
 # (Optional) RAW URLs override or addition
@@ -456,32 +457,31 @@ class NaverLandPlaywright:
                     matched_pyeong = None
                     pyeongs = complex_info.get("pyeongs", [])
                     
-                    target_space = float(space.get("supplySpace", 0))
-                    
                     for p in pyeongs:
-                        p_name = p.get("pyeongName", "")
+                        p_name = p.get("name", "")
                         target_name = space.get("supplySpaceName", "")
                         
-                        # 1. Exact Name Match (Best)
                         if p_name and target_name and p_name == target_name:
                             matched_pyeong = p
                             break
-                        
-                        # 2. Strict Area Match (Supply + Exclusive)
-                        p_supply = float(p.get("supplyArea", 0))
-                        p_exclusive = float(p.get("exclusiveArea", 0))
-                        target_exclusive = float(space.get("exclusiveSpace", 0))
-                        
-                        if abs(p_supply - target_space) < 0.1 and abs(p_exclusive - target_exclusive) < 0.1:
-                            matched_pyeong = p
-                            break
+                    
+                    # 2. Strict Area Match (Priority 2)
+                    if not matched_pyeong:
+                        for p in pyeongs:
+                            p_supply = float(p.get("supplyArea", 0))
+                            p_exclusive = float(p.get("exclusiveArea", 0))
+                            target_exclusive = float(space.get("exclusiveSpace", 0))
+                            if abs(p_supply - target_space) < 0.1 and abs(p_exclusive - target_exclusive) < 0.1:
+                                matched_pyeong = p
+                                break
 
-                        # 3. Loose Area Match (Fallback - Original Logic with tighter tolerance)
-                        if abs(p_supply - target_space) < 0.1:
-                            matched_pyeong = p
-                            # Don't break yet, keep looking for a better match? 
-                            # Actually, if we are here, risks are high. Let's stick to the first close one if strict failed.
-                            break
+                    # 3. Loose Area Match (Priority 3 - Fallback)
+                    if not matched_pyeong:
+                        for p in pyeongs:
+                            p_supply = float(p.get("supplyArea", 0)) # Corrected Key
+                            if abs(p_supply - target_space) < 0.1:
+                                matched_pyeong = p
+                                break
                     
                     if matched_pyeong:
                         # Hallway Type: 10=Stairs, 20=Corridor, 30=Mixed
