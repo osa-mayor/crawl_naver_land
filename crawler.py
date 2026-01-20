@@ -15,8 +15,7 @@ from land_selectors import NaverLandSelectors
 # ==========================================
 # Target Regions (Search by Name using naver_region_codes.json)
 TARGET_REGIONS = [
-    "서울시", "경기도", "인천시", "부산시", "대구시", "광주시", "대전시", "울산시", "세종시",
-    "강원도", "충청북도", "충청남도", "전라북도", "전라남도", "경상북도", "경상남도", "제주도"
+    "서울시", "경기도"
 ]
 
 # (Optional) RAW URLs override or addition
