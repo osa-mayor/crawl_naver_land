@@ -459,10 +459,28 @@ class NaverLandPlaywright:
                     target_space = float(space.get("supplySpace", 0))
                     
                     for p in pyeongs:
-                        p_area = float(p.get("supplyArea", 0)) # Corrected Key
-                        # Match logic
-                        if abs(p_area - target_space) < 0.5:
+                        p_name = p.get("pyeongName", "")
+                        target_name = space.get("supplySpaceName", "")
+                        
+                        # 1. Exact Name Match (Best)
+                        if p_name and target_name and p_name == target_name:
                             matched_pyeong = p
+                            break
+                        
+                        # 2. Strict Area Match (Supply + Exclusive)
+                        p_supply = float(p.get("supplyArea", 0))
+                        p_exclusive = float(p.get("exclusiveArea", 0))
+                        target_exclusive = float(space.get("exclusiveSpace", 0))
+                        
+                        if abs(p_supply - target_space) < 0.1 and abs(p_exclusive - target_exclusive) < 0.1:
+                            matched_pyeong = p
+                            break
+
+                        # 3. Loose Area Match (Fallback - Original Logic with tighter tolerance)
+                        if abs(p_supply - target_space) < 0.1:
+                            matched_pyeong = p
+                            # Don't break yet, keep looking for a better match? 
+                            # Actually, if we are here, risks are high. Let's stick to the first close one if strict failed.
                             break
                     
                     if matched_pyeong:
