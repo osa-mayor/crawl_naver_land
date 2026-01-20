@@ -2,8 +2,8 @@ name: Daily Land Crawler
 
 on:
   schedule:
-    # 00:00 UTC = 09:00 KST (Every day)
-    - cron: '0 0 * * *'
+    # KST 01:00 AM = UTC 16:00 PM (Previous Day)
+    - cron: '0 16 * * *'
   workflow_dispatch:  # Manual trigger allowed
 
 jobs:
