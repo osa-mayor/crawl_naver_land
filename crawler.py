@@ -8,6 +8,8 @@ import logging
 from datetime import datetime
 import os
 import sqlite3
+import argparse
+import sys
 from land_selectors import NaverLandSelectors
 
 # ==========================================
@@ -667,11 +669,26 @@ def save_to_db(df, table_name="real_estate"):
         print(f"❌ Database Error: {e}")
 
 async def main():
+    parser = argparse.ArgumentParser(description="Naver Land Crawler")
+    parser.add_argument("--regions", nargs="+", help="List of regions to crawl (overrides config)")
+    parser.add_argument("--db-path", default="real_estate.db", help="Path to output SQLite DB")
+    args = parser.parse_args()
+
+    # Override Configuration
+    target_regions_config = TARGET_REGIONS # Use a different name to avoid confusion with args.regions
+    if args.regions:
+        target_regions_config = args.regions
+        print(f"🔧 Config Override: Target Regions set to {target_regions_config}")
     
+    global DB_PATH
+    if args.db_path:
+        DB_PATH = args.db_path
+        print(f"🔧 Config Override: DB Path set to {DB_PATH}")
+
     # 1. Identify Processing Plan
     regions_to_process = []
     
-    for target in TARGET_REGIONS:
+    for target in target_regions_config: # Use the potentially overridden config
         subregions = get_subregions(target)
         if subregions:
             print(f"🏙️ '{target}' Detected! Splitting into {len(subregions)} sub-regions...")

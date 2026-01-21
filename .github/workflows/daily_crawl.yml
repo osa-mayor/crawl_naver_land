@@ -7,9 +7,26 @@ on:
   workflow_dispatch:  # Manual trigger allowed
 
 jobs:
-  crawl-and-archive:
+  crawl:
+    name: Crawl ${{ matrix.name }}
     runs-on: ubuntu-latest
-    
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: "Seoul"
+            id: "seoul"
+            regions: "서울시"
+          - name: "Gyeonggi"
+            id: "gyeonggi"
+            regions: "경기도"
+          - name: "Metros"
+            id: "metros"
+            regions: "인천시 부산시 대구시 광주시 대전시 울산시 세종시"
+          - name: "Provinces"
+            id: "provinces"
+            regions: "강원도 충청북도 충청남도 전라북도 전라남도 경상북도 경상남도 제주도"
+
     steps:
       - name: Checkout Public Code
         uses: actions/checkout@v4
@@ -45,38 +62,58 @@ jobs:
 
       - name: Run Crawler
         env:
-          MAX_CONCURRENT_PAGES: 5 # Tweak this number to optimize performance (3~5 recommended)
-        run: python crawler.py
+          MAX_CONCURRENT_PAGES: 5
+        run: |
+          echo "🚀 Processing Regions: ${{ matrix.regions }}"
+          # Run crawler with specific regions and unique DB output path
+          python crawler.py --regions ${{ matrix.regions }} --db-path db_${{ matrix.id }}.db
+
+      - name: Upload Partial DB
+        uses: actions/upload-artifact@v4
+        with:
+          name: partial-db-${{ matrix.id }}
+          path: db_${{ matrix.id }}.db
+          retention-days: 1
 
       - name: Upload Logs
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: crawler-logs
+          name: logs-${{ matrix.id }}
           path: crawling_db.log
-          
-      # --- Private DB Handling ---
-      
+
+  merge-and-push:
+    needs: crawl
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Public Code (for scripts)
+        uses: actions/checkout@v4
+
       - name: Checkout Private DB Repo
         uses: actions/checkout@v4
         with:
-          # You must add PRIVATE_REPO_NAME (e.g. 'username/my-private-db')
           repository: ${{ secrets.PRIVATE_REPO_NAME }}
-          # You must add PRIVATE_REPO_PAT (Personal Access Token)
           token: ${{ secrets.PRIVATE_REPO_PAT }}
           path: private_db
-          
-      - name: Move DB to Private Repo
-        run: |
-          if [ -f "real_estate.db" ]; then
-            echo "✅ DB Found. Moving to private repo..."
-            # Move the DB file to the private repository folder
-            mv -f real_estate.db private_db/
-          else
-            echo "⚠️ DB Not Found! Crawler might have failed or found no data."
-            exit 0
-          fi
+      
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.10'
 
+      - name: Download All Partial DBs
+        uses: actions/download-artifact@v4
+        with:
+          pattern: partial-db-*
+          merge-multiple: true # Download all files to current dir
+          
+      - name: Merge Databases
+        run: |
+          echo "🔄 Starting Merge Process..."
+          ls -R
+          # Merge all 'db_*.db' into 'private_db/real_estate.db'
+          python merge_db.py "db_*.db" "private_db/real_estate.db"
+          
       - name: Commit and Push to Private Repo
         run: |
           cd private_db
@@ -85,10 +122,9 @@ jobs:
           
           git add real_estate.db
           
-          # Check for changes before committing to avoid errors
           if git diff --staged --quiet; then
             echo "No changes to commit."
           else
-            git commit -m "Update DB: $(date +'%Y-%m-%d')"
+            git commit -m "Update DB: $(date +'%Y-%m-%d') (Merged Parallel Job)"
             git push
           fi
