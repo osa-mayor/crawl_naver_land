@@ -156,7 +156,9 @@ class NaverLandPlaywright:
 
         # 3. Extract Complexes
         try:
-            await page.wait_for_selector(NaverLandSelectors.COMPLEX_ITEM, timeout=10000)
+            # Optimize: Reduce wait time for empty regions (10s -> 5s)
+            # 3s might be too risky for heavy regions, 5s is a safe middle ground.
+            await page.wait_for_selector(NaverLandSelectors.COMPLEX_ITEM, state="attached", timeout=5000)
         except:
             logging.warning("Timeout waiting for complex list (or empty).")
 
