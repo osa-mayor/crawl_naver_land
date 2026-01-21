@@ -82,7 +82,7 @@ jobs:
           name: logs-${{ matrix.id }}
           path: crawling_db.log
 
-  merge-and-push:
+  archive-and-backup:
     needs: crawl
     runs-on: ubuntu-latest
     steps:
@@ -101,30 +101,69 @@ jobs:
         with:
           python-version: '3.10'
 
+      - name: Install Google API Dependencies
+        run: |
+          pip install -r requirements.txt
+          pip install google-api-python-client google-auth-httplib2 google-auth-oauthlib
+
       - name: Download All Partial DBs
         uses: actions/download-artifact@v4
         with:
           pattern: partial-db-*
           merge-multiple: true # Download all files to current dir
           
-      - name: Merge Databases
+      - name: 1. Generate Excel Files
         run: |
-          echo "🔄 Starting Merge Process..."
-          ls -R
-          # Merge all 'db_*.db' into 'private_db/real_estate.db'
-          python merge_db.py "db_*.db" "private_db/real_estate.db"
+          echo "📊 Generating Excel files from Partial DBs..."
+          for db_file in db_*.db; do
+            # Extract ID from filename (db_seoul.db -> seoul)
+            id_name=$(echo "$db_file" | sed 's/db_//' | sed 's/.db//')
+            
+            # Use current date in filename
+            date_str=$(date +'%Y-%m-%d')
+            excel_name="${date_str}_${id_name}.xlsx"
+            
+            echo "   Converting $db_file -> $excel_name"
+            python export_db.py "$db_file" --output "$excel_name"
+          done
           
-      - name: Commit and Push to Private Repo
+      - name: 2. Archive to Private GitHub Repo (Split DBs)
         run: |
+          # Move DB files to private_db folder
+          mv db_*.db private_db/
+          
           cd private_db
           git config user.name "GitHub Action"
           git config user.email "action@github.com"
           
-          git add real_estate.db
+          # Add all split DBs
+          git add db_*.db
           
           if git diff --staged --quiet; then
             echo "No changes to commit."
           else
-            git commit -m "Update DB: $(date +'%Y-%m-%d') (Merged Parallel Job)"
+            git commit -m "Update DBs: $(date +'%Y-%m-%d') (Split Storage)"
             git push
+          fi
+          
+      - name: 3. Backup to Google Drive
+        env:
+          GDRIVE_SA_KEY: ${{ secrets.GDRIVE_SA_KEY }}
+          GDRIVE_FOLDER_ID: ${{ secrets.GDRIVE_FOLDER_ID }}
+        run: |
+          if [ -z "$GDRIVE_SA_KEY" ] || [ -z "$GDRIVE_FOLDER_ID" ]; then
+            echo "⚠️ Google Drive Secrets missing. Skipping Backup."
+          else
+            echo "🚀 Uploading to Google Drive..."
+            # Upload DBs (from private_db) AND generated Excel files (from current dir)
+            
+            # 1. Upload DBs
+            for db in private_db/db_*.db; do
+               python upload_drive.py --files "$db" --folder "$GDRIVE_FOLDER_ID" --key "$GDRIVE_SA_KEY"
+            done
+            
+            # 2. Upload Excel Files
+            for xlsx in *.xlsx; do
+               python upload_drive.py --files "$xlsx" --folder "$GDRIVE_FOLDER_ID" --key "$GDRIVE_SA_KEY"
+            done
           fi
