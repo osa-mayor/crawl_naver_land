@@ -82,10 +82,11 @@ jobs:
           name: logs-${{ matrix.id }}
           path: crawling_db.log
 
-  archive-and-backup:
+archive-and-backup:
     needs: crawl
     runs-on: ubuntu-latest
-    if: always() # Run even if crawl partially failed (to notify)
+    if: always() # Run even if crawl partially failed
+
     steps:
       - name: Checkout Public Code (for scripts)
         uses: actions/checkout@v4
@@ -96,7 +97,7 @@ jobs:
           repository: ${{ secrets.PRIVATE_REPO_NAME }}
           token: ${{ secrets.PRIVATE_REPO_PAT }}
           path: private_db
-      
+
       - name: Set up Python
         uses: actions/setup-python@v4
         with:
@@ -111,32 +112,40 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           pattern: partial-db-*
-          merge-multiple: true # Download all files to current dir
-          
+          merge-multiple: true
+
+      # ✅ "서울 db가 있냐" 말고 "db_*.db가 하나라도 있냐"로 판단
       - name: Check Crawl Status
         id: check_status
         run: |
-          if [ -f "db_seoul.db" ]; then
+          if compgen -G "db_*.db" > /dev/null; then
             echo "status=success" >> $GITHUB_OUTPUT
+            echo "db_count=$(ls db_*.db | wc -l)" >> $GITHUB_OUTPUT
           else
             echo "status=failure" >> $GITHUB_OUTPUT
+            echo "db_count=0" >> $GITHUB_OUTPUT
           fi
 
+      # ✅ 엑셀은 실패해도 다음 단계 계속 진행
       - name: 1. Generate Excel Files (Skip if failed)
+        id: gen_excel
         if: steps.check_status.outputs.status == 'success'
+        continue-on-error: true
         run: |
           echo "📊 Generating Excel files from Partial DBs..."
           for db_file in db_*.db; do
-            id_name=$(echo "$db_file" | sed 's/db_//' | sed 's/.db//')
+            id_name=$(echo "$db_file" | sed 's/^db_//' | sed 's/\.db$//')
             date_str=$(date +'%Y-%m-%d')
             excel_name="${date_str}_${id_name}.xlsx"
             python export_db.py "$db_file" --output "$excel_name"
           done
-          
+
+      # ✅ 엑셀이 실패해도 DB는 private repo에 푸시
       - name: 2. Archive to Private GitHub Repo (Split DBs)
         if: steps.check_status.outputs.status == 'success'
+        continue-on-error: true
         run: |
-          mv db_*.db private_db/
+          cp db_*.db private_db/
           cd private_db
           git config user.name "GitHub Action"
           git config user.email "action@github.com"
@@ -147,9 +156,11 @@ jobs:
             git commit -m "Update DBs: $(date +'%Y-%m-%d')"
             git push
           fi
-          
+
+      # ✅ 엑셀이 없을 수도 있으니 *.xlsx 루프 안전하게
       - name: 3. Backup to Google Drive
         if: steps.check_status.outputs.status == 'success'
+        continue-on-error: true
         env:
           GDRIVE_SA_KEY: ${{ secrets.GDRIVE_SA_KEY }}
           GDRIVE_FOLDER_ID: ${{ secrets.GDRIVE_FOLDER_ID }}
@@ -157,24 +168,38 @@ jobs:
           if [ -z "$GDRIVE_SA_KEY" ]; then
             echo "⚠️ Google Drive Secrets missing."
           else
+            shopt -s nullglob
+
+            # DB 업로드 (private_db에 복사된 파일 기준)
             for db in private_db/db_*.db; do
-               python upload_drive.py --files "$db" --folder "$GDRIVE_FOLDER_ID" --key "$GDRIVE_SA_KEY"
+              python upload_drive.py --files "$db" --folder "$GDRIVE_FOLDER_ID" --key "$GDRIVE_SA_KEY"
             done
+
+            # 엑셀 업로드 (없으면 루프 자체가 0회)
             for xlsx in *.xlsx; do
-               python upload_drive.py --files "$xlsx" --folder "$GDRIVE_FOLDER_ID" --key "$GDRIVE_SA_KEY"
+              python upload_drive.py --files "$xlsx" --folder "$GDRIVE_FOLDER_ID" --key "$GDRIVE_SA_KEY"
             done
           fi
 
+      # ✅ 무조건 디스코드 알림
       - name: 4. Send Discord Notification
+        if: always()
         env:
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          GDRIVE_FOLDER_ID: ${{ secrets.GDRIVE_FOLDER_ID }}
         run: |
           CURRENT_DATE=$(date +'%Y-%m-%d')
-          
-          if [ "${{ steps.check_status.outputs.status }}" == "success" ]; then
-             MSG="✅ **[크롤링 성공]** $CURRENT_DATE 부동산 데이터 수집 완료!\n📁 엑셀 파일이 구글 드라이브에 업로드되었습니다.\n☁️ Google Drive: [바로가기](https://drive.google.com/drive/folders/${{ secrets.GDRIVE_FOLDER_ID }})"
+          DB_COUNT="${{ steps.check_status.outputs.db_count }}"
+          EXCEL_OUTCOME="${{ steps.gen_excel.outcome }}"
+
+          if [ "${{ steps.check_status.outputs.status }}" != "success" ]; then
+            MSG="🚨 **[크롤링 실패]** $CURRENT_DATE DB 파일 생성/다운로드 실패 (db_*.db 없음). GitHub Actions 로그 확인!"
           else
-             MSG="🚨 **[크롤링 실패]** $CURRENT_DATE 데이터 수집 중 문제가 발생했습니다. GitHub Actions 로그를 확인해주세요."
+            if [ "$EXCEL_OUTCOME" = "failure" ]; then
+              MSG="⚠️ **[부분 성공]** $CURRENT_DATE 크롤링/DB($DB_COUNT개) OK ✅ / 엑셀 변환 실패 ❌\n☁️ Google Drive: https://drive.google.com/drive/folders/$GDRIVE_FOLDER_ID"
+            else
+              MSG="✅ **[크롤링 성공]** $CURRENT_DATE DB($DB_COUNT개) + 엑셀 변환 OK\n☁️ Google Drive: https://drive.google.com/drive/folders/$GDRIVE_FOLDER_ID"
+            fi
           fi
-          
+
           python send_discord.py --message "$MSG" --webhook "$DISCORD_WEBHOOK_URL"
