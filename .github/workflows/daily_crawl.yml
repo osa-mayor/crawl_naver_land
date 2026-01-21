@@ -85,6 +85,7 @@ jobs:
   archive-and-backup:
     needs: crawl
     runs-on: ubuntu-latest
+    if: always() # Run even if crawl partially failed (to notify)
     steps:
       - name: Checkout Public Code (for scripts)
         uses: actions/checkout@v4
@@ -101,7 +102,7 @@ jobs:
         with:
           python-version: '3.10'
 
-      - name: Install Google API Dependencies
+      - name: Install Dependencies
         run: |
           pip install -r requirements.txt
           pip install google-api-python-client google-auth-httplib2 google-auth-oauthlib
@@ -112,58 +113,68 @@ jobs:
           pattern: partial-db-*
           merge-multiple: true # Download all files to current dir
           
-      - name: 1. Generate Excel Files
+      - name: Check Crawl Status
+        id: check_status
+        run: |
+          if [ -f "db_seoul.db" ]; then
+            echo "status=success" >> $GITHUB_OUTPUT
+          else
+            echo "status=failure" >> $GITHUB_OUTPUT
+          fi
+
+      - name: 1. Generate Excel Files (Skip if failed)
+        if: steps.check_status.outputs.status == 'success'
         run: |
           echo "📊 Generating Excel files from Partial DBs..."
           for db_file in db_*.db; do
-            # Extract ID from filename (db_seoul.db -> seoul)
             id_name=$(echo "$db_file" | sed 's/db_//' | sed 's/.db//')
-            
-            # Use current date in filename
             date_str=$(date +'%Y-%m-%d')
             excel_name="${date_str}_${id_name}.xlsx"
-            
-            echo "   Converting $db_file -> $excel_name"
             python export_db.py "$db_file" --output "$excel_name"
           done
           
       - name: 2. Archive to Private GitHub Repo (Split DBs)
+        if: steps.check_status.outputs.status == 'success'
         run: |
-          # Move DB files to private_db folder
           mv db_*.db private_db/
-          
           cd private_db
           git config user.name "GitHub Action"
           git config user.email "action@github.com"
-          
-          # Add all split DBs
           git add db_*.db
-          
           if git diff --staged --quiet; then
             echo "No changes to commit."
           else
-            git commit -m "Update DBs: $(date +'%Y-%m-%d') (Split Storage)"
+            git commit -m "Update DBs: $(date +'%Y-%m-%d')"
             git push
           fi
           
       - name: 3. Backup to Google Drive
+        if: steps.check_status.outputs.status == 'success'
         env:
           GDRIVE_SA_KEY: ${{ secrets.GDRIVE_SA_KEY }}
           GDRIVE_FOLDER_ID: ${{ secrets.GDRIVE_FOLDER_ID }}
         run: |
-          if [ -z "$GDRIVE_SA_KEY" ] || [ -z "$GDRIVE_FOLDER_ID" ]; then
-            echo "⚠️ Google Drive Secrets missing. Skipping Backup."
+          if [ -z "$GDRIVE_SA_KEY" ]; then
+            echo "⚠️ Google Drive Secrets missing."
           else
-            echo "🚀 Uploading to Google Drive..."
-            # Upload DBs (from private_db) AND generated Excel files (from current dir)
-            
-            # 1. Upload DBs
             for db in private_db/db_*.db; do
                python upload_drive.py --files "$db" --folder "$GDRIVE_FOLDER_ID" --key "$GDRIVE_SA_KEY"
             done
-            
-            # 2. Upload Excel Files
             for xlsx in *.xlsx; do
                python upload_drive.py --files "$xlsx" --folder "$GDRIVE_FOLDER_ID" --key "$GDRIVE_SA_KEY"
             done
           fi
+
+      - name: 4. Send Discord Notification
+        env:
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+        run: |
+          CURRENT_DATE=$(date +'%Y-%m-%d')
+          
+          if [ "${{ steps.check_status.outputs.status }}" == "success" ]; then
+             MSG="✅ **[크롤링 성공]** $CURRENT_DATE 부동산 데이터 수집 완료!\n📁 엑셀 파일이 구글 드라이브에 업로드되었습니다.\n☁️ Google Drive: [바로가기](https://drive.google.com/drive/folders/${{ secrets.GDRIVE_FOLDER_ID }})"
+          else
+             MSG="🚨 **[크롤링 실패]** $CURRENT_DATE 데이터 수집 중 문제가 발생했습니다. GitHub Actions 로그를 확인해주세요."
+          fi
+          
+          python send_discord.py --message "$MSG" --webhook "$DISCORD_WEBHOOK_URL"
