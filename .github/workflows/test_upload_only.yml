@@ -27,3 +27,9 @@ jobs:
           GDRIVE_FOLDER_ID: ${{ secrets.GDRIVE_FOLDER_ID }}
         run: |
           python upload_drive.py --files test_gha_upload.txt --folder "$GDRIVE_FOLDER_ID" --token "$GDRIVE_TOKEN"
+
+      - name: Send Test Notification
+        env:
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+        run: |
+          python send_discord.py --message "🧪 **[테스트 성공]** 구글 드라이브 업로드 + 디스코드 알림 모두 정상 작동 중입니다!" --webhook "$DISCORD_WEBHOOK_URL"
