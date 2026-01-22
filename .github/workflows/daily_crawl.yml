@@ -4,7 +4,7 @@ on:
   schedule:
     # KST 01:00 AM = UTC 16:00 PM (Previous Day)
     - cron: '0 16 * * *'
-  workflow_dispatch:  # Manual trigger allowed
+  workflow_dispatch:
 
 jobs:
   crawl:
@@ -65,8 +65,7 @@ jobs:
           MAX_CONCURRENT_PAGES: 5
         run: |
           echo "🚀 Processing Regions: ${{ matrix.regions }}"
-          # Run crawler with specific regions and unique DB output path
-          python crawler.py --regions ${{ matrix.regions }} --db-path db_${{ matrix.id }}.db
+          python crawler.py --regions "${{ matrix.regions }}" --db-path "db_${{ matrix.id }}.db"
 
       - name: Upload Partial DB
         uses: actions/upload-artifact@v4
@@ -82,10 +81,11 @@ jobs:
           name: logs-${{ matrix.id }}
           path: crawling_db.log
 
-archive-and-backup:
+
+  archive-and-backup:
     needs: crawl
     runs-on: ubuntu-latest
-    if: always() # Run even if crawl partially failed
+    if: always()
 
     steps:
       - name: Checkout Public Code (for scripts)
@@ -114,7 +114,6 @@ archive-and-backup:
           pattern: partial-db-*
           merge-multiple: true
 
-      # ✅ "서울 db가 있냐" 말고 "db_*.db가 하나라도 있냐"로 판단
       - name: Check Crawl Status
         id: check_status
         run: |
@@ -126,7 +125,6 @@ archive-and-backup:
             echo "db_count=0" >> $GITHUB_OUTPUT
           fi
 
-      # ✅ 엑셀은 실패해도 다음 단계 계속 진행
       - name: 1. Generate Excel Files (Skip if failed)
         id: gen_excel
         if: steps.check_status.outputs.status == 'success'
@@ -140,7 +138,6 @@ archive-and-backup:
             python export_db.py "$db_file" --output "$excel_name"
           done
 
-      # ✅ 엑셀이 실패해도 DB는 private repo에 푸시
       - name: 2. Archive to Private GitHub Repo (Split DBs)
         if: steps.check_status.outputs.status == 'success'
         continue-on-error: true
@@ -157,7 +154,6 @@ archive-and-backup:
             git push
           fi
 
-      # ✅ 엑셀이 없을 수도 있으니 *.xlsx 루프 안전하게
       - name: 3. Backup to Google Drive
         if: steps.check_status.outputs.status == 'success'
         continue-on-error: true
@@ -170,18 +166,15 @@ archive-and-backup:
           else
             shopt -s nullglob
 
-            # DB 업로드 (private_db에 복사된 파일 기준)
             for db in private_db/db_*.db; do
               python upload_drive.py --files "$db" --folder "$GDRIVE_FOLDER_ID" --key "$GDRIVE_SA_KEY"
             done
 
-            # 엑셀 업로드 (없으면 루프 자체가 0회)
             for xlsx in *.xlsx; do
               python upload_drive.py --files "$xlsx" --folder "$GDRIVE_FOLDER_ID" --key "$GDRIVE_SA_KEY"
             done
           fi
 
-      # ✅ 무조건 디스코드 알림
       - name: 4. Send Discord Notification
         if: always()
         env:
