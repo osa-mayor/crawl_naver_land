@@ -158,20 +158,20 @@ jobs:
         if: steps.check_status.outputs.status == 'success'
         continue-on-error: true
         env:
-          GDRIVE_SA_KEY: ${{ secrets.GDRIVE_SA_KEY }}
+          GDRIVE_TOKEN: ${{ secrets.GDRIVE_TOKEN }}
           GDRIVE_FOLDER_ID: ${{ secrets.GDRIVE_FOLDER_ID }}
         run: |
-          if [ -z "$GDRIVE_SA_KEY" ]; then
-            echo "⚠️ Google Drive Secrets missing."
+          if [ -z "$GDRIVE_TOKEN" ]; then
+            echo "⚠️ Google Drive Secrets (GDRIVE_TOKEN) missing."
           else
             shopt -s nullglob
 
             for db in private_db/db_*.db; do
-              python upload_drive.py --files "$db" --folder "$GDRIVE_FOLDER_ID" --key "$GDRIVE_SA_KEY"
+              python upload_drive.py --files "$db" --folder "$GDRIVE_FOLDER_ID" --token "$GDRIVE_TOKEN"
             done
 
             for xlsx in *.xlsx; do
-              python upload_drive.py --files "$xlsx" --folder "$GDRIVE_FOLDER_ID" --key "$GDRIVE_SA_KEY"
+              python upload_drive.py --files "$xlsx" --folder "$GDRIVE_FOLDER_ID" --token "$GDRIVE_TOKEN"
             done
           fi
 
