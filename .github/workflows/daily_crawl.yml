@@ -65,7 +65,7 @@ jobs:
           MAX_CONCURRENT_PAGES: 5
         run: |
           echo "🚀 Processing Regions: ${{ matrix.regions }}"
-          python crawler.py --regions "${{ matrix.regions }}" --db-path "db_${{ matrix.id }}.db"
+          python crawler.py --regions ${{ matrix.regions }} --db-path db_${{ matrix.id }}.db
 
       - name: Upload Partial DB
         uses: actions/upload-artifact@v4
