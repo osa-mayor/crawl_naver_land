@@ -24,7 +24,7 @@ TARGET_REGIONS = [
 TARGET_URLS = []
 
 # Filtering Options
-MIN_HOUSEHOLDS = 100
+MIN_HOUSEHOLDS = 0
 EXCLUDE_LOW_FLOORS = False
 
 # [System Config]
@@ -181,10 +181,10 @@ class NaverLandPlaywright:
 
                 # Filters
                 is_apt = False
-                badge_el = await item.query_selector(NaverLandSelectors.COMPLEX_BADGE)
                 if badge_el:
                     badge_text = await badge_el.inner_text()
-                    if "아파트" in badge_text and "오피스텔" not in badge_text:
+                    # Allow '아파트' OR '분양권', but exclude '오피스텔'
+                    if ("아파트" in badge_text or "분양권" in badge_text) and "오피스텔" not in badge_text:
                         is_apt = True
                 
                 if not is_apt: continue
@@ -614,34 +614,118 @@ def get_region_urls(region_list):
     except: return []
 
     final_items = [] # List of (name, url)
+    
+    # Helper for Deep Search
+    def find_node_recursive(node, target_key):
+        if target_key in node:
+            return node[target_key], target_key
+        
+        # Partial match on keys
+        for k in node:
+            if target_key in k: return node[k], k
+        
+        # Recursive children
+        for k, v in node.items():
+            if "children" in v:
+                found, found_key = find_node_recursive(v["children"], target_key)
+                if found: return found, found_key
+        return None, None
+
     for query in region_list:
         parts = query.split()
-        curr = data
-        found = True
-        last_key = ""
-        for part in parts:
-            if part in curr:
-                last_key = part
-                curr = curr[part].get("children", {}) if "children" in curr[part] else curr[part]
-            else:
-                match = next((k for k in curr if part in k), None)
-                if match:
-                    last_key = match
-                    if "children" in curr[match]: curr = curr[match]["children"]
-                    # Else it's leaf?
-                else:
-                    found = False; break
+        if not parts: continue
         
-        if found:
-            # curr is now either a dict of children (if we stopped at Gu) or a Leaf Node (if we specified Dong)
-            # If it has "url" and no "children", it's a leaf.
-            if "url" in curr and "children" not in curr:
-                 final_items.append((last_key, curr["url"]))
+        root_part = parts[0]
+        start_node = None
+        start_node_key = ""
+        
+        # 1. Try finding root_part at top level
+        for k in data:
+            if root_part in k:
+               start_node = data[k]
+               start_node_key = k
+               break
+        
+        # 2. If not at top, Deep Search
+        if not start_node:
+             start_node, start_node_key = find_node_recursive(data, root_part)
+        
+        if not start_node:
+            print(f"⚠️ Region not found: {root_part}")
+            continue
+
+        if not start_node:
+            print(f"⚠️ Region not found: {root_part}")
+            continue
+
+        # 3. Traverse remaining parts
+        curr = start_node
+        valid_path = True
+        
+        # We use a while loop to allow skipping parts (lookahead)
+        idx = 1
+        while idx < len(parts):
+            part = parts[idx]
+            
+            # Check if this part is already covered by the start_node_key
+            if start_node_key and part in start_node_key:
+                idx += 1
+                continue
+            
+            if "children" in curr:
+                children = curr["children"]
+                matched_child = None
+                
+                # A. Try Lookahead (e.g. "전주시" + "완산구" -> "전주시 완산구")
+                if idx + 1 < len(parts):
+                    next_part = parts[idx+1]
+                    combined = f"{part} {next_part}"
+                    if combined in children:
+                        matched_child = children[combined]
+                        idx += 2 # Consume both
+                        curr = matched_child
+                        continue
+                
+                # B. Try Exact Match
+                if part in children:
+                    matched_child = children[part]
+                    idx += 1
+                    curr = matched_child
+                    continue
+
+                # C. Try Partial Match (Fallback)
+                # But be careful: "전주시" matches "전주시 덕진구" AND "전주시 완산구"
+                # If we rely on partial match, we must be sure it's the right one.
+                # If we failed (A) and (B), and we are here, it means the user input might be incomplete 
+                # or strictly partial.
+                
+                for ck in children:
+                    if part in ck:
+                        matched_child = children[ck]
+                        break
+                
+                if matched_child:
+                    curr = matched_child
+                    idx += 1
+                else:
+                    print(f"❌ Sub-region '{part}' not found in current context")
+                    valid_path = False; break
             else:
-                 # It's a dict of children (e.g. Gu node's children dict)
-                 # curr keys are Dong names
-                 for k, v in curr.items():
-                     final_items.extend(get_all_leaf_items(v, k))
+                 print(f"❌ Current node has no sub-regions, cannot find '{part}'")
+                 valid_path = False; break
+        
+        if valid_path:
+             # curr is the target node. Extract urls.
+             if "url" in curr and "children" not in curr:
+                 # Leaf
+                 final_items.append((parts[-1], curr["url"]))
+             elif "children" in curr:
+                 # Intermediate -> get all leaves
+                 final_items.extend(get_all_leaf_items(curr, parts[-1]))
+             elif "url" in curr:
+                 # Some node that has url but also might have children? 
+                 # Just treat as leaf if we stopped here
+                 final_items.append((parts[-1], curr["url"]))
                  
     return final_items # Returns list of (dong_name, url)
 
