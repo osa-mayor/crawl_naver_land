@@ -1,118 +1,49 @@
-
+import asyncio
 import json
-import requests
-import time
-import random
-from concurrent.futures import ThreadPoolExecutor, as_completed
+import logging
+from playwright.async_api import async_playwright
+import os
 
+# Configuration
 REGION_FILE = "naver_region_codes.json"
-MAX_WORKERS = 10  # Moderate concurrency to be polite
-USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+MAX_CONCURRENT_TABS = 5  # Reduced concurrency to ensure stability
+TIMEOUT_MS = 10000
 
-def get_complex_count(url):
+# Selectors (Borrowed from land_selectors.py/crawler.py)
+SELECTOR_COMPLEX_ITEM = "li[class*='ComplexItem']" 
+SELECTOR_NO_RESULT = "div[class*='no_result'], div[class*='no_data']" # Approximate, check crawler logic if needed
+
+# Logging
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(message)s')
+
+async def check_url(context, url):
     """
-    Fetches the region page and mimics the API call or parses initial state
-    to determine if there are any complexes.
-    Actually, Naver Land uses a separate API for the list.
-    Let's extract the region codes from URL and call the API directly for speed.
-    URL: https://fin.land.naver.com/regions?si=...&gun=...&eup=...
-    API: https://fin.land.naver.com/api/regions/complexes?CortarNo={cortar_no}&RealEstateType=APT%3AABYG%3AJGC%3APRE&TradeType=A1
-    
-    We need 'CortarNo'.
-    The 'eup' param in URL usually corresponds to the specific region code (CortarNo).
-    Let's try to infer CortarNo from URL params.
+    Visit URL and check if complex items exist.
     """
+    page = await context.new_page()
     try:
-        # Parse params
-        from urllib.parse import urlparse, parse_qs
-        parsed = urlparse(url)
-        qs = parse_qs(parsed.query)
+        await page.goto(url, wait_until="domcontentloaded", timeout=TIMEOUT_MS)
         
-        # Determine CortarNo (most specific one)
-        cortar_no = None
-        if 'eup' in qs: cortar_no = qs['eup'][0]
-        elif 'gun' in qs: cortar_no = qs['gun'][0]
-        elif 'si' in qs: cortar_no = qs['si'][0]
-        
-        if not cortar_no: return False
-        
-        # Construct API URL
-        # We need to include 'PRE' (Presale) as we added it to filter.
-        # Types: APT (Apt), ABYG (Bunyangkwon - wait, code might be different), 
-        # Actually, let's just check 'APT' and 'ABYG' (Bunyangkwon) and 'JGC' (Reconstruction) and 'PRE' (Pre-sale?).
-        # Safest is to check the general count.
-        
-        api_url = f"https://fin.land.naver.com/api/regions/complexes?CortarNo={cortar_no}&RealEstateType=APT:ABYG:JGC&TradeType=A1"
-        
-        headers = {
-            "User-Agent": USER_AGENT,
-            "Referer": url
-        }
-        
-        resp = requests.get(api_url, headers=headers, timeout=5)
-        if resp.status_code == 200:
-            data = resp.json()
-            # The API returns a list of complexes.
-            # complexList
-            complexes = data.get("complexList", [])
-            return len(complexes) > 0
-        return False
+        # Wait for either complex item or no result
+        # We try to find the item first. 
+        try:
+            # If we find a complex item within timeout, it's valid
+            await page.wait_for_selector(SELECTOR_COMPLEX_ITEM, timeout=5000, state="attached")
+            return True
+        except:
+            # If timeout, it means no complex item found quickly.
+            # Double check if "No Result" text is present or just empty.
+            # For robustness, we assume False if selector not found.
+            return False
+            
     except Exception as e:
-        print(f"Error checking {url}: {e}")
+        # logging.error(f"Error checking {url}: {e}")
         return False
-
-def check_node(node_key, node_data):
-    """
-    Recursive check.
-    Returns (updated_node, has_complexes)
-    """
-    has_complexes = False
-    
-    # If leaf
-    if "url" in node_data and "children" not in node_data:
-        has_complexes = get_complex_count(node_data["url"])
-        output_node = node_data.copy()
-        output_node["has_complexes"] = has_complexes
-        print(f"Checked {node_key}: {'✅' if has_complexes else '❌'}")
-        # Sleep slightly to avoid strict rate limit if single thread, but we are parallelizing.
-        return output_node, has_complexes
-
-    # If non-leaf (has children)
-    if "children" in node_data:
-        new_children = {}
-        # We can parallelize processing children if there are many
-        # For simplicity in recursion, let's process sequentially here or use a helper
-        # But actually, we want to iterate the whole tree.
-        
-        # Let's verify children
-        child_has_any = False
-        for k, v in node_data["children"].items():
-            updated_child, child_ok = check_node(k, v)
-            new_children[k] = updated_child
-            if child_ok: child_has_any = True
-        
-        output_node = node_data.copy()
-        output_node["children"] = new_children
-        output_node["has_complexes"] = child_has_any # Propagate up?
-        # Actually user wants to flag the LEAVES primarily.
-        # But flagging intermediate nodes helps us skip entire branches.
-        return output_node, child_has_any
-        
-    return node_data, False
+    finally:
+        await page.close()
 
 def flatten_nodes(data):
-    """
-    Yields (path_tuple, node_data) for all leaves to be processed.
-    path_tuple = ('경기도', '성남시', '분당구', '구미동')
-    node_return needs to act as a pointer? 
-    It's hard to update the massive JSON inplace with threads.
-    
-    Strategy:
-    1. Collect all LEAF tasks.
-    2. Run them in parallel.
-    3. Update the main dict.
-    4. Then propagate status up.
-    """
+    """Recursively collect leaf nodes with URLs."""
     tasks = []
     
     def traverse(d, path):
@@ -127,45 +58,54 @@ def flatten_nodes(data):
         
     return tasks
 
-def main():
+async def main():
     print("📂 Loading region codes...")
     with open(REGION_FILE, "r", encoding="utf-8") as f:
         data = json.load(f)
 
-    tasks = flatten_nodes(data)
-    print(f"🚀 Found {len(tasks)} regions to validate.")
+    all_tasks = flatten_nodes(data)
+    # Optimization: Filter out already FALSE regions? No, we validate monthly so check everything.
+    # But for debugging speed, maybe we only check known likely ones?
+    # User wants FULL sync.
     
-    results = {} # path_tuple -> bool
+    print(f"🚀 Found {len(all_tasks)} regions to validate.")
     
-    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
-        future_map = {executor.submit(get_complex_count, item[1]["url"]): item[0] for item in tasks}
+    results = {}
+    
+    async with async_playwright() as p:
+        browser = await p.chromium.launch(headless=True)
+        # Create a single context (or multiple if needed, but context per batch is safer)
+        context = await browser.new_context(
+            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+        )
         
-        count = 0
-        for future in as_completed(future_map):
-            path = future_map[future]
-            try:
-                exists = future.result()
-                results[tuple(path)] = exists
-                count += 1
-                if count % 100 == 0:
-                    print(f"Progress: {count}/{len(tasks)} ({count/len(tasks)*100:.1f}%)")
-            except Exception as e:
-                print(f"Failed {path}: {e}")
-                results[tuple(path)] = False # Default to false on error? Or Keep?
+        # Process in chunks
+        chunk_size = MAX_CONCURRENT_TABS
+        
+        total = len(all_tasks)
+        for i in range(0, total, chunk_size):
+            chunk = all_tasks[i : i + chunk_size]
+            
+            # Create tasks
+            aws = []
+            for path, node in chunk:
+                aws.append(check_url(context, node["url"]))
+            
+            # Run batch
+            flags = await asyncio.gather(*aws)
+            
+            # Store results
+            for (path, node), flag in zip(chunk, flags):
+                results[tuple(path)] = flag
+            
+            if (i + chunk_size) % 100 < chunk_size:
+                print(f"Progress: {min(i + chunk_size, total)}/{total} ({(min(i + chunk_size, total)/total)*100:.1f}%)")
+        
+        await browser.close()
 
     # Update Data Structure
     print("💾 Updating JSON structure...")
     
-    def update_recursive(d, path_stack):
-        # We are at a node.
-        # If it's a leaf (check if path_stack is fully consumed if we track by path?)
-        # Better: traverse 'data' again, recreate flags.
-        
-        # But wait, we need to lookup result by path.
-        # It's better to construct a new data or modify in place.
-        pass
-
-    # Re-traverse to update
     def apply_updates(node, current_path):
         is_leaf = "children" not in node
         
@@ -174,7 +114,6 @@ def main():
             node["has_complexes"] = flag
             return flag
         else:
-            # Intermediate
             any_child_valid = False
             for k, v in node["children"].items():
                 child_valid = apply_updates(v, current_path + [k])
@@ -190,7 +129,9 @@ def main():
     with open(REGION_FILE, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
     
-    print("✅ Validation Complete!")
+    # Summary of True regions
+    true_count = sum(1 for v in results.values() if v)
+    print(f"✅ Validation Complete! Found {true_count} regions with complexes.")
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())
