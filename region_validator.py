@@ -16,67 +16,17 @@ SELECTOR_NO_RESULT = "div[class*='no_result'], div[class*='no_data']" # Approxim
 # Logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(message)s')
 
-async def check_url(context, url):
-    """
-    Visit URL and check if complex items exist.
-    """
-    page = await context.new_page()
-    try:
-        await page.goto(url, wait_until="domcontentloaded", timeout=TIMEOUT_MS)
-        
-        # Wait for either complex item or no result
-        # We try to find the item first. 
-        try:
-            # If we find a complex item within timeout, it's valid
-            await page.wait_for_selector(SELECTOR_COMPLEX_ITEM, timeout=5000, state="attached")
-            return True
-        except:
-            # If timeout, it means no complex item found quickly.
-            # Double check if "No Result" text is present or just empty.
-            # For robustness, we assume False if selector not found.
-            return False
-            
-    except Exception as e:
-        # logging.error(f"Error checking {url}: {e}")
-        return False
-    finally:
-        await page.close()
-
-def flatten_nodes(data):
-    """Recursively collect leaf nodes with URLs."""
-    tasks = []
-    
-    def traverse(d, path):
-        if "children" in d:
-            for k, v in d["children"].items():
-                traverse(v, path + [k])
-        elif "url" in d:
-            tasks.append((path, d))
-            
-    for k, v in data.items():
-        traverse(v, [k])
-        
-    return tasks
-
-async def main():
-    print("📂 Loading region codes...")
-    with open(REGION_FILE, "r", encoding="utf-8") as f:
-        data = json.load(f)
-
-    all_tasks = flatten_nodes(data)
-    # Optimization: Filter out already FALSE regions? No, we validate monthly so check everything.
-    # But for debugging speed, maybe we only check known likely ones?
-    # User wants FULL sync.
-    
-    print(f"🚀 Found {len(all_tasks)} regions to validate.")
-    
-    results = {}
-    
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=True)
-        # Create a single context (or multiple if needed, but context per batch is safer)
+        # Emulate Desktop Browser (Exact match to crawler.py)
         context = await browser.new_context(
-            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            viewport={"width": 1280, "height": 720},
+            is_mobile=False,
+            has_touch=False,
+            extra_http_headers={
+                "Accept-Language": "ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7"
+            }
         )
         
         # Process in chunks
@@ -102,6 +52,51 @@ async def main():
                 print(f"Progress: {min(i + chunk_size, total)}/{total} ({(min(i + chunk_size, total)/total)*100:.1f}%)")
         
         await browser.close()
+
+async def check_url(context, url):
+    """
+    Visit URL and check if complex items exist.
+    """
+    page = await context.new_page()
+    # Stealth
+    await page.add_init_script("""
+        Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
+    """)
+    
+    try:
+        await page.goto(url, wait_until="domcontentloaded", timeout=30000)
+        
+        # Robust Wait: Wait for API response that loads the list
+        try:
+            async with page.expect_response(lambda response: "complex" in response.url and response.status == 200, timeout=5000) as response_info:
+                pass
+        except:
+            pass # Proceed to check selectors even if API verify fails
+
+        # Fallback short wait
+        if not page.is_closed():
+            await page.wait_for_timeout(2000)
+            
+        # Check selectors
+        selectors = [
+            "li[class*='ComplexItem'][class*='article']", 
+            "div[class*='list_complex']",
+            "button[class*='complex_link']",
+            "li[class*='ComplexItem']"
+        ]
+        
+        for sel in selectors:
+            try:
+                if await page.query_selector(sel):
+                    return True
+            except: continue
+            
+        return False
+            
+    except Exception as e:
+        return False
+    finally:
+        await page.close()
 
     # Update Data Structure
     print("💾 Updating JSON structure...")
