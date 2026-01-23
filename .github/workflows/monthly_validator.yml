@@ -1,0 +1,42 @@
+name: Monthly Region Validator
+
+on:
+  schedule:
+    # Run at 00:00 on the 1st of every month
+    - cron: '0 0 1 * *'
+  workflow_dispatch:
+
+jobs:
+  validate-regions:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.10'
+
+      - name: Install Dependencies
+        run: |
+          pip install requests
+
+      - name: Run Region Validator
+        run: |
+          python region_validator.py
+
+      - name: Commit and Push Changes
+        run: |
+          git config user.name "GitHub Action"
+          git config user.email "action@github.com"
+          git add naver_region_codes.json
+          if git diff --staged --quiet; then
+            echo "No changes in region validity."
+          else
+            git commit -m "Update region validity: $(date +'%Y-%m-%d')"
+            git push
+          fi

@@ -590,6 +590,10 @@ class NaverLandPlaywright:
 
 # Helper Functions
 def get_all_leaf_items(node, current_name=""):
+    # Optimization: Skip if validated as empty (and flag exists)
+    if node.get("has_complexes") is False:
+        return []
+
     items = []
     if "children" in node and node["children"]:
         for k, v in node["children"].items():
@@ -598,10 +602,10 @@ def get_all_leaf_items(node, current_name=""):
             # The structure is usually City -> Gu -> Dong. 
             # Keep k as the name if it's a leaf.
             items.extend(get_all_leaf_items(v, k))
-    else:
-        if "url" in node:
-            # It's a leaf. current_name should be the Dong name passed from parent loop.
-            items.append((current_name, node["url"]))
+    # If it's a leaf node with URL
+    elif "url" in node:
+        # It's a leaf. current_name should be the Dong name passed from parent loop.
+        items.append((current_name, node["url"]))
     return items
 
 def get_region_urls(region_list):
