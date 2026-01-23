@@ -12,9 +12,56 @@ def export_to_excel(db_path, output_path=None):
 
     try:
         conn = sqlite3.connect(db_path)
+        cur = conn.cursor()
         
-        # Determine Table Name (Assuming 'real_estate')
-        query = "SELECT * FROM real_estate"
+        # Check for tables
+        cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='prices';")
+        has_prices = cur.fetchone()
+        
+        if has_prices:
+            print("ℹ️ Detected Normalized Schema (prices + complexes)")
+            query = """
+            SELECT
+                c.region_depth1 AS "시/도",
+                c.region_depth2 AS "시/군/구",
+                c.region_depth3 AS "읍/면/동",
+                c.name AS "아파트명",
+                c.completion_date AS "준공일",
+                c.total_households AS "총세대수",
+                p.pyeong_type AS "타입",
+                p.supply_area AS "공급면적",
+                p.exclusive_area AS "전용면적",
+                p.hallway_type AS "현관구조",
+                p.room_bath AS "방/욕실",
+                p.trade_min_std AS "매매 최저가 (일반)",
+                p.trade_min_low AS "매매 최저가 (저층)",
+                p.trade_max AS "매매 최고가",
+                p.trade_avg AS "매매 평균가",
+                p.trade_count AS "매매 매물수 (전체)",
+                p.rent_min AS "전세 최저가",
+                p.rent_max AS "전세 최고가",
+                p.rent_avg AS "전세 평균가",
+                p.rent_count AS "전세 매물수",
+                p.gap AS "갭",
+                p.jeonse_ratio || '%' AS "전세가율",
+                c.total_dongs AS "총동수",
+                c.construction_company AS "건설사",
+                c.heating_method AS "난방방식",
+                c.heating_fuel AS "난방연료",
+                c.parking_per_household AS "세대당주차대수",
+                c.far AS "용적률",
+                c.bcr AS "건폐율",
+                c.latitude AS "위도",
+                c.longitude AS "경도",
+                p.date AS "수집일",
+                c.complex_no AS "complex_id"
+            FROM prices p
+            JOIN complexes c ON p.complex_no = c.complex_no
+            ORDER BY p.date DESC, c.region_depth1, c.region_depth2, c.region_depth3, c.name
+            """
+        else:
+            print("ℹ️ Detected Legacy Schema (real_estate)")
+            query = "SELECT * FROM real_estate"
         
         # Read Data
         df = pd.read_sql_query(query, conn)

@@ -743,20 +743,167 @@ def get_subregions(region_name):
     except: pass
     return []
 
+def init_db():
+    """Initialize Database with Normalized Schema"""
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+    
+    # 1. Complex Info Table (Static Data)
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS complexes (
+        complex_no INTEGER PRIMARY KEY,
+        name TEXT,
+        region_depth1 TEXT,
+        region_depth2 TEXT,
+        region_depth3 TEXT,
+        total_households INTEGER,
+        total_dongs INTEGER,
+        completion_date TEXT,
+        construction_company TEXT,
+        heating_method TEXT,
+        heating_fuel TEXT,
+        parking_per_household REAL,
+        far REAL,
+        bcr REAL,
+        latitude REAL,
+        longitude REAL,
+        last_updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    )
+    """)
+
+    # 2. Daily Price Table (Dynamic Data)
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS prices (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        complex_no INTEGER,
+        date TEXT,
+        pyeong_type TEXT,
+        supply_area REAL,
+        exclusive_area REAL,
+        hallway_type TEXT,
+        room_bath TEXT,
+        trade_min_std INTEGER,
+        trade_min_low INTEGER,
+        trade_max INTEGER,
+        trade_avg INTEGER,
+        trade_count INTEGER,
+        rent_min INTEGER,
+        rent_max INTEGER,
+        rent_avg INTEGER,
+        rent_count INTEGER,
+        gap INTEGER,
+        jeonse_ratio REAL,
+        FOREIGN KEY (complex_no) REFERENCES complexes (complex_no)
+    )
+    """)
+    
+    # Index for fast lookup
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_prices_complex_date ON prices (complex_no, date)")
+    
+    conn.commit()
+    conn.close()
+
 def save_to_db(df, table_name="real_estate"):
-    """Save DataFrame to SQLite Database"""
+    """Save DataFrame to Normalized SQLite Database"""
     if df.empty: return
     
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+    
+    count_complex = 0
+    count_prices = 0
+
     try:
-        conn = sqlite3.connect(DB_PATH)
-        # Using 'append' to add new data every run
-        # Ideally we should handle duplicates, but for pure history tracking, append is safer.
-        # Queries can filter by '수집일' later.
-        df.to_sql(table_name, conn, if_exists="append", index=False)
-        conn.close()
-        print(f"💾 Database Updated: Added {len(df)} rows to '{table_name}' table.")
+        # Pre-processing: Clean format strings to integers
+        def parse_price(val):
+            if not val: return 0
+            if isinstance(val, (int, float)): return int(val)
+            # Remove comma and convert 'Man-won' string to integer
+            # Note: The crawler gathered them as 'Man-won' units already (divided by 10000)
+            # So "50,000" string is 50,000 Man-won.
+            clean = str(val).replace(",", "")
+            return int(clean) if clean.isdigit() else 0
+
+        # Iterate over unique complexes for 'complexes' table
+        # We assume one row per Area Type, so duplicates exist for complex info.
+        # We group by complex_id to extract static info once per batch.
+        complex_groups = df.groupby("complex_id")
+        
+        for cid, group in complex_groups:
+            # Extract static info from the first row of the group
+            first = group.iloc[0]
+            
+            # Upsert into 'complexes'
+            # (INSERT OR REPLACE matches on PRIMARY KEY complex_no)
+            cur.execute("""
+            INSERT OR REPLACE INTO complexes (
+                complex_no, name, region_depth1, region_depth2, region_depth3,
+                total_households, total_dongs, completion_date, construction_company,
+                heating_method, heating_fuel, parking_per_household,
+                far, bcr, latitude, longitude, last_updated
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                int(cid),
+                first["아파트명"],
+                first["시/도"],
+                first["시/군/구"],
+                first["읍/면/동"],
+                int(first.get("총세대수", 0) or 0),
+                int(first.get("총동수", 0) or 0),
+                first.get("준공일", ""),
+                first.get("건설사", ""),
+                first.get("난방방식", ""),
+                first.get("난방연료", ""),
+                float(str(first.get("세대당주차대수", 0)).replace("대","") or 0),
+                float(str(first.get("용적률", "0")).replace("%","") or 0),
+                float(str(first.get("건폐율", "0")).replace("%","") or 0),
+                float(first.get("위도", 0) or 0),
+                float(first.get("경도", 0) or 0),
+                datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            ))
+            count_complex += 1
+            
+            # Insert dynamic prices for all rows in this group
+            for _, row in group.iterrows():
+                cur.execute("""
+                INSERT INTO prices (
+                    complex_no, date, pyeong_type, supply_area, exclusive_area,
+                    hallway_type, room_bath,
+                    trade_min_std, trade_min_low, trade_max, trade_avg, trade_count,
+                    rent_min, rent_max, rent_avg, rent_count,
+                    gap, jeonse_ratio
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """, (
+                    int(cid),
+                    row["수집일"],
+                    row["타입"],
+                    float(row["공급면적"] or 0),
+                    float(row["전용면적"] or 0),
+                    row.get("현관구조", ""),
+                    row.get("방/욕실", ""),
+                    parse_price(row["매매 최저가 (일반)"]),
+                    parse_price(row["매매 최저가 (저층)"]),
+                    parse_price(row["매매 최고가"]),
+                    parse_price(row["매매 평균가"]),
+                    int(row["매매 매물수 (전체)"] or 0),
+                    parse_price(row["전세 최저가"]),
+                    parse_price(row["전세 최고가"]),
+                    parse_price(row["전세 평균가"]),
+                    int(row["전세 매물수"] or 0),
+                    parse_price(row.get("갭", 0)),
+                    float(str(row.get("전세가율", "0")).replace("%","") or 0)
+                ))
+                count_prices += 1
+
+        conn.commit()
+        print(f"💾 Database Updated: {count_complex} complexes updated, {count_prices} price records added.")
+        
     except Exception as e:
         print(f"❌ Database Error: {e}")
+        import traceback
+        traceback.print_exc()
+    finally:
+        conn.close()
 
 async def main():
     parser = argparse.ArgumentParser(description="Naver Land Crawler")
@@ -774,6 +921,9 @@ async def main():
     if args.db_path:
         DB_PATH = args.db_path
         print(f"🔧 Config Override: DB Path set to {DB_PATH}")
+
+    # Initialize DB (Schema Check)
+    init_db()
 
     # 1. Identify Processing Plan
     regions_to_process = []
