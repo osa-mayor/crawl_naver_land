@@ -5,7 +5,7 @@ import sys
 import os
 from datetime import datetime
 
-def export_to_excel(db_path, output_path=None):
+def export_to_excel(db_path, output_path=None, min_households=0, regions=None):
     if not os.path.exists(db_path):
         print(f"❌ Error: Database file not found at {db_path}")
         return False

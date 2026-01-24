@@ -120,14 +120,24 @@ jobs:
           echo "🔄 Merging 20 shards into master db..."
           python merge_db.py "db_shard_*.db" merged.db
 
-      - name: 2. Generate Consolidated Excel
+      - name: 2. Generate Consolidated Excels
         if: steps.check_status.outputs.status == 'success'
         continue-on-error: true
         run: |
-          echo "📊 Generating Excel from Merged DB..."
+          echo "📊 Generating Excel Reports..."
           date_str=$(date +'%Y-%m-%d')
-          excel_name="export_naver_land_${date_str}.xlsx"
-          python export_db.py merged.db --output "$excel_name"
+          
+          # 1. Seoul (Min 100)
+          echo "Processing Seoul..."
+          python export_db.py merged.db --output "export_${date_str}_Seoul.xlsx" --min-households 100 --region "서울시"
+          
+          # 2. Gyeonggi (Min 100)
+          echo "Processing Gyeonggi..."
+          python export_db.py merged.db --output "export_${date_str}_Gyeonggi.xlsx" --min-households 100 --region "경기도"
+          
+          # 3. Metros (Min 100)
+          echo "Processing Metros..."
+          python export_db.py merged.db --output "export_${date_str}_Metros.xlsx" --min-households 100 --region "인천시 부산시 대구시 광주시 대전시 울산시 세종시"
 
       - name: 3. Archive to Private GitHub Repo
         if: steps.check_status.outputs.status == 'success'
