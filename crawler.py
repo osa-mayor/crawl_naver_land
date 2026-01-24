@@ -927,7 +927,7 @@ def save_to_db(df, table_name="real_estate"):
     finally:
         conn.close()
 
-# Helper for Sharded Processing
+# 분산 처리(Sharding)를 위한 헬퍼 함수
 def get_sharded_targets(shard_index, shard_total):
     json_path = "naver_region_codes.json"
     if not os.path.exists(json_path):
@@ -959,18 +959,19 @@ def get_sharded_targets(shard_index, shard_total):
     for k, v in data.items():
         collect(v, k)
         
-    # Sort deterministically
+    # 결정적 정렬 (Deterministic Sort)
+    # 실행할 때마다 순서가 바뀌지 않도록 이름순으로 정렬합니다.
     all_targets.sort(key=lambda x: x["name"])
     
     total_count = len(all_targets)
     if total_count == 0: return []
     
-    # Slice
-    # Use Striped (Modulo) Sharding to balance load
-    # e.g., Shard 0 gets indices 0, 20, 40...
-    # This mixes heavy regions (Seoul) and light regions (Gangwon) across all shards.
+    # 슬라이싱 (Slicing)
+    # 로드 밸런싱을 위해 스트라이프(Modulo) 방식 사용 (Striped Sharding)
+    # 예: Shard 0번은 인덱스 0, 20, 40... 
+    # 이렇게 해야 '서울(무거움)'과 '강원(가벼움)'이 섞여서 골고루 분배됨.
     sharded = all_targets[shard_index::shard_total]
-    print(f"🧩 Shard {shard_index}/{shard_total} (Striped): Processing {len(sharded)} regions")
+    print(f"🧩 샤드 {shard_index}/{shard_total} (스트라이프 방식): 총 {len(sharded)}개 지역 처리 예정")
     
     return sharded
 
@@ -987,7 +988,7 @@ async def main():
         DB_PATH = args.db_path
         print(f"🔧 Config Override: DB Path set to {DB_PATH}")
 
-    # Initialize DB (Schema Check)
+    # DB 초기화 (스키마 확인 및 생성)
     init_db()
 
     # 1. Identify Processing Plan
