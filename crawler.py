@@ -125,8 +125,20 @@ class NaverLandPlaywright:
             tasks = [worker(item) for item in target_urls]
             if tasks:
                 await asyncio.gather(*tasks)
-            else:
                 logging.warning("No URLs to crawl.")
+            
+            # --- CRITICAL FIX: Save Data in Sharded Mode ---
+            logging.info("💾 Processing and Saving Collected Data...")
+            try:
+                df = self.process_data()
+                if not df.empty:
+                    save_to_db(df)
+                    logging.info(f"✅ Saved {len(df)} rows to DB.")
+                else:
+                    logging.warning("⚠️ No data rows generated.")
+            except Exception as e:
+                logging.error(f"❌ Failed to save DB: {e}")
+            # ------------------------------------------------
 
             await browser.close()
 
