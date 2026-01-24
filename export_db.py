@@ -20,6 +20,8 @@ def export_to_excel(db_path, output_path=None, min_households=0, regions=None):
         
         if has_prices:
             print("ℹ️ Detected Normalized Schema (prices + complexes)")
+            
+            # Base Query
             query = """
             SELECT
                 c.region_depth1 AS "시/도",
@@ -57,18 +59,41 @@ def export_to_excel(db_path, output_path=None, min_households=0, regions=None):
                 c.complex_no AS "complex_id"
             FROM prices p
             JOIN complexes c ON p.complex_no = c.complex_no
-            ORDER BY p.date DESC, c.region_depth1, c.region_depth2, c.region_depth3, c.name
+            WHERE 1=1
             """
+            
+            params = []
+            
+            # Filter: Min Households
+            if min_households > 0:
+                query += " AND c.total_households >= ?"
+                params.append(min_households)
+                
+            # Filter: Regions (OR logic)
+            if regions:
+                # Robustness: Handle space-seperated string ["A B C"] -> ["A", "B", "C"]
+                if len(regions) == 1 and " " in regions[0]:
+                    regions = regions[0].split()
+                    
+                placeholders = " OR ".join(["c.region_depth1 LIKE ?" for _ in regions])
+                query += f" AND ({placeholders})"
+                for r in regions:
+                    params.append(f"%{r}%")
+            
+            query += " ORDER BY p.date DESC, c.region_depth1, c.region_depth2, c.region_depth3, c.name"
+            
+            # Execute with params
+            df = pd.read_sql_query(query, conn, params=params)
+            
         else:
             print("ℹ️ Detected Legacy Schema (real_estate)")
             query = "SELECT * FROM real_estate"
+            df = pd.read_sql_query(query, conn)
         
-        # Read Data
-        df = pd.read_sql_query(query, conn)
         conn.close()
         
         if df.empty:
-            print(f"⚠️ Warning: Database {db_path} is empty.")
+            print(f"⚠️ Warning: Database {db_path} is empty or no matches for filters.")
             return False
 
         # Generate Output Filename if not provided
@@ -91,7 +116,9 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Export SQLite DB to Excel")
     parser.add_argument("db_path", help="Path to the SQLite database file")
     parser.add_argument("--output", "-o", help="Output Excel file path (optional)")
+    parser.add_argument("--min-households", type=int, default=0, help="Minimum households filter")
+    parser.add_argument("--region", nargs="+", help="Filter by region name (e.g. 서울시 경기도)")
 
     args = parser.parse_args()
     
-    export_to_excel(args.db_path, args.output)
+    export_to_excel(args.db_path, args.output, args.min_households, args.region)
