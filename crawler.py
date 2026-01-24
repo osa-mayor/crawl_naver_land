@@ -125,6 +125,7 @@ class NaverLandPlaywright:
             tasks = [worker(item) for item in target_urls]
             if tasks:
                 await asyncio.gather(*tasks)
+            else:
                 logging.warning("No URLs to crawl.")
             
             # --- CRITICAL FIX: Save Data in Sharded Mode ---
