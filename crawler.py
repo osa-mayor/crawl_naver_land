@@ -927,18 +927,65 @@ def save_to_db(df, table_name="real_estate"):
     finally:
         conn.close()
 
+# Helper for Sharded Processing
+def get_sharded_targets(shard_index, shard_total):
+    json_path = "naver_region_codes.json"
+    if not os.path.exists(json_path):
+        print(f"❌ {json_path} not found.")
+        return []
+    
+    with open(json_path, "r", encoding="utf-8") as f: data = json.load(f)
+    
+    # Collect all valid leaf nodes (has_complexes=True)
+    all_targets = []
+    
+    def collect(node, path_name):
+        # Check validation flag (if missing, assume False unless forced)
+        # But for safety, we include if 'url' exists and not explicitly False?
+        # Actually validation script sets it to True/False.
+        is_valid = node.get("has_complexes", False)
+        
+        if "url" in node and is_valid:
+            # We use the full path name key for sorting to be deterministic across machines
+            all_targets.append({
+                "name": path_name,
+                "url": node["url"]
+            })
+        
+        if "children" in node:
+            for k, v in node["children"].items():
+                collect(v, f"{path_name} {k}".strip())
+
+    for k, v in data.items():
+        collect(v, k)
+        
+    # Sort deterministically
+    all_targets.sort(key=lambda x: x["name"])
+    
+    total_count = len(all_targets)
+    if total_count == 0: return []
+    
+    # Slice
+    # Simple modulo sharding is okay, but contiguous blocks are better for caching?
+    # Actually modulo is safer if names are clustereed.
+    # Let's do block sharding: [start:end]
+    batch_size = (total_count + shard_total - 1) // shard_total
+    start = shard_index * batch_size
+    end = min(start + batch_size, total_count)
+    
+    sharded = all_targets[start:end]
+    print(f"🧩 Shard {shard_index}/{shard_total}: Processing {len(sharded)} regions ({start}-{end} of {total_count})")
+    
+    return sharded
+
 async def main():
     parser = argparse.ArgumentParser(description="Naver Land Crawler")
     parser.add_argument("--regions", nargs="+", help="List of regions to crawl (overrides config)")
     parser.add_argument("--db-path", default="real_estate.db", help="Path to output SQLite DB")
+    parser.add_argument("--shard-index", type=int, default=None, help="Shard Index (0-based)")
+    parser.add_argument("--shard-total", type=int, default=None, help="Total Shards")
     args = parser.parse_args()
 
-    # Override Configuration
-    target_regions_config = TARGET_REGIONS # Use a different name to avoid confusion with args.regions
-    if args.regions:
-        target_regions_config = args.regions
-        print(f"🔧 Config Override: Target Regions set to {target_regions_config}")
-    
     global DB_PATH
     if args.db_path:
         DB_PATH = args.db_path
@@ -949,45 +996,70 @@ async def main():
 
     # 1. Identify Processing Plan
     regions_to_process = []
+    direct_targets = []
+
+    # Case A: Sharding Mode (Highest Priority)
+    if args.shard_index is not None and args.shard_total is not None:
+        print(f"⚡ Sharding Enabled: Index {args.shard_index} / Total {args.shard_total}")
+        direct_targets = get_sharded_targets(args.shard_index, args.shard_total)
+        # direct_targets is list of dicts {name, url}
     
-    for target in target_regions_config: # Use the potentially overridden config
-        subregions = get_subregions(target)
-        if subregions:
-            print(f"🏙️ '{target}' Detected! Splitting into {len(subregions)} sub-regions...")
-            for sub in subregions:
-                regions_to_process.append(f"{target} {sub}")
-        else:
-            regions_to_process.append(target)
-    
-    # If no regions but URLs exist (Legacy mode)
-    if not regions_to_process and TARGET_URLS:
-        regions_to_process = ["UNKNOWN_REGION"]
-
-    if not regions_to_process:
-        print("❌ No items to process.")
-        return
-
-    print(f"📋 Processing Queue: {len(regions_to_process)} regions.")
-
-    # 2. Process Each Region/Gu
-    for region_name in regions_to_process:
-        # Resolve URLs for this specific region
-        current_urls = []
-        if region_name == "UNKNOWN_REGION":
-            current_urls = TARGET_URLS[:]
-        else:
-            print(f"\n Target: {region_name} ...")
-            current_urls = get_region_urls([region_name])
+    # Case B: Manual Region List
+    elif args.regions:
+        target_regions_config = args.regions
+        print(f"🔧 Config Override: Target Regions set to {target_regions_config}")
         
-        if not current_urls:
-            print(f"⚠️ No URLs found for {region_name}")
-            continue
-            
-        # New Crawler Instance per Gu
+        for target in target_regions_config:
+            subregions = get_subregions(target)
+            if subregions:
+                for sub in subregions: regions_to_process.append(f"{target} {sub}")
+            else:
+                regions_to_process.append(target)
+                
+    # Case C: Default Config
+    else:
+        target_regions_config = TARGET_REGIONS
+        for target in target_regions_config:
+            subregions = get_subregions(target)
+            if subregions:
+                for sub in subregions: regions_to_process.append(f"{target} {sub}")
+            else:
+                regions_to_process.append(target)
+
+    # 2. Execution
+    if direct_targets:
+        # Sharded Execution
+        print(f"🚀 Starting Sharded Crawl with {len(direct_targets)} locations...")
         crawler = NaverLandPlaywright()
-        crawler.region_name = region_name # Pass region name for fallback
-        print(f"🚀 Crawling {region_name} (URLs: {len(current_urls)})...")
-        await crawler.run_test(current_urls, headless=HEADLESS_MODE)
+        # Clean list for crawler
+        urls = [(t["name"], t["url"]) for t in direct_targets]
+        await crawler.run_test(urls, headless=HEADLESS_MODE)
+        
+    else:
+        # Legacy/Region-Name Execution
+        if not regions_to_process and TARGET_URLS: regions_to_process = ["UNKNOWN_REGION"]
+        
+        if not regions_to_process:
+            print("❌ No items to process.")
+            return
+
+        print(f"📋 Processing Queue: {len(regions_to_process)} regions.")
+        for region_name in regions_to_process:
+            current_urls = []
+            if region_name == "UNKNOWN_REGION":
+                current_urls = TARGET_URLS[:]
+            else:
+                print(f"\n Target: {region_name} ...")
+                current_urls = get_region_urls([region_name])
+            
+            if not current_urls:
+                print(f"⚠️ No URLs found for {region_name}")
+                continue
+                
+            crawler = NaverLandPlaywright()
+            crawler.region_name = region_name
+            print(f"🚀 Crawling {region_name} (URLs: {len(current_urls)})...")
+            await crawler.run_test(current_urls, headless=HEADLESS_MODE)
         
         # Process & Save
         df = crawler.process_data()
