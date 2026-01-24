@@ -8,7 +8,7 @@ on:
 
 jobs:
   crawl:
-    name: Crawl ${{ matrix.name }}
+    name: Crawl Shard ${{ matrix.shard }}
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
