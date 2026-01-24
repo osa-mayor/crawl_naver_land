@@ -3,7 +3,7 @@ class NaverLandSelectors:
     MORE_BUTTON = "button[class*='button-more'], button:has-text('더보기')"
     
     # Complex List Item (CSS Module robustness)
-    COMPLEX_ITEM = "li[class*='ComplexItem'][class*='article']"
+    COMPLEX_ITEM = "li[class*='ComplexItem']"
     
     # Within Complex Item
     COMPLEX_LINK = "a[class*='ComplexItem'][class*='link'], a[class*='link']"

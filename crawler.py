@@ -45,10 +45,7 @@ logging.basicConfig(
 
 # User-Agent List for Stealth
 USER_AGENTS = [
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Edge/120.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/605.1.15"
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
 ]
 
 class DataProcessor:
@@ -80,6 +77,8 @@ class NaverLandPlaywright:
         return {
             "user_agent": ua,
             "viewport": {"width": 1280, "height": 720},
+            "is_mobile": False,
+            "has_touch": False,
             "extra_http_headers": {
                 "Accept-Language": "ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7"
             }
@@ -136,6 +135,15 @@ class NaverLandPlaywright:
         try:
             # 1. Go to Region
             await page.goto(target_url, wait_until="domcontentloaded", timeout=60000)
+            
+            # Robust Wait: Wait for API response that loads the list
+            try:
+                # Wait for either complex list or region complex list API
+                async with page.expect_response(lambda response: "complex" in response.url and response.status == 200, timeout=10000) as response_info:
+                    pass
+            except:
+                pass # Proceed
+
             await page.wait_for_timeout(random.uniform(2000, 3000))
         except Exception as e:
             logging.error(f"Failed to load region page {target_url}: {e}")
@@ -163,29 +171,38 @@ class NaverLandPlaywright:
             logging.warning("Timeout waiting for complex list (or empty).")
 
         complex_items = await page.query_selector_all(NaverLandSelectors.COMPLEX_ITEM)
+        logging.info(f"🔍 Raw Complex Items Found: {len(complex_items)}")
+        
         filtered_cids = []
 
         for item in complex_items:
             try:
                 # Link & CID
                 link_el = await item.query_selector(NaverLandSelectors.COMPLEX_LINK)
-                if not link_el: continue
+                if not link_el: 
+                    # logging.warning("Skipping: No Link")
+                    continue
                 href = await link_el.get_attribute("href")
                 match = re.search(r"/complexes/(\d+)", href)
-                if not match: continue
+                if not match: 
+                    # logging.warning("Skipping: No CID match")
+                    continue
                 cid = match.group(1)
 
                 # Name
                 name_el = await item.query_selector(NaverLandSelectors.COMPLEX_NAME)
                 name = await name_el.inner_text() if name_el else f"Complex_{cid}"
 
-                # Filters
+                # Filters (Badge)
                 is_apt = False
+                badge_el = await item.query_selector(NaverLandSelectors.COMPLEX_BADGE)
                 if badge_el:
                     badge_text = await badge_el.inner_text()
                     # Allow '아파트' OR '분양권', but exclude '오피스텔'
                     if ("아파트" in badge_text or "분양권" in badge_text) and "오피스텔" not in badge_text:
                         is_apt = True
+                    # else: logging.info(f"Skipping {name}: Badge '{badge_text}' not target.")
+                # else: logging.warning(f"Skipping {name}: No Badge")
                 
                 if not is_apt: continue
 
@@ -200,7 +217,9 @@ class NaverLandPlaywright:
                             households = int(h_match.group(1).replace(",", ""))
                             break
                 
-                if households < MIN_HOUSEHOLDS: continue
+                if households < MIN_HOUSEHOLDS: 
+                    logging.info(f"Skipping {name}: Households {households} < {MIN_HOUSEHOLDS}")
+                    continue
 
                 self.complexes[cid] = {
                     "name": name, 
@@ -212,7 +231,10 @@ class NaverLandPlaywright:
                 continue
         
         logging.info(f"Target Count in Region: {len(filtered_cids)}")
-        if not filtered_cids: return
+        if not filtered_cids:
+            await page.screenshot(path=f"debug_crawler_fail_{dong_name}.png")
+            logging.error(f"Saved debug screenshot to debug_crawler_fail_{dong_name}.png")
+            return
 
         # ========================================================
         # [OPTIMIZATION] Parallel Fetch of Details (Complex & Pyeong)
