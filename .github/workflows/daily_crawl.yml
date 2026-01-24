@@ -121,6 +121,7 @@ jobs:
           python merge_db.py "db_shard_*.db" merged.db
 
       - name: 2. Generate Consolidated Excels
+        id: gen_excel
         if: steps.check_status.outputs.status == 'success'
         continue-on-error: true
         run: |
