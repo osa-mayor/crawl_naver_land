@@ -194,7 +194,7 @@ class NaverLandPlaywright:
             logging.warning("Timeout waiting for complex list (or empty).")
 
         complex_items = await page.query_selector_all(NaverLandSelectors.COMPLEX_ITEM)
-        logging.info(f"🔍 Raw Complex Items Found: {len(complex_items)}")
+        logging.info(f"🔍 Raw Complex Items Found: {len(complex_items)//6}")
 
         filtered_cids = []
 
