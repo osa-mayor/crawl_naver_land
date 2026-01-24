@@ -139,6 +139,10 @@ jobs:
           echo "Processing Metros..."
           python export_db.py merged.db --output "export_${date_str}_Metros.xlsx" --min-households 100 --region "인천시 부산시 대구시 광주시 대전시 울산시 세종시"
 
+          # 4. Provinces (Min 100)
+          echo "Processing Provinces..."
+          python export_db.py merged.db --output "export_${date_str}_Provinces.xlsx" --min-households 100 --region "강원도 충청북도 충청남도 경상북도 경상남도 전북도 전라남도 제주도"
+
       - name: 3. Archive to Private GitHub Repo
         if: steps.check_status.outputs.status == 'success'
         continue-on-error: true
