@@ -966,15 +966,11 @@ def get_sharded_targets(shard_index, shard_total):
     if total_count == 0: return []
     
     # Slice
-    # Simple modulo sharding is okay, but contiguous blocks are better for caching?
-    # Actually modulo is safer if names are clustereed.
-    # Let's do block sharding: [start:end]
-    batch_size = (total_count + shard_total - 1) // shard_total
-    start = shard_index * batch_size
-    end = min(start + batch_size, total_count)
-    
-    sharded = all_targets[start:end]
-    print(f"🧩 Shard {shard_index}/{shard_total}: Processing {len(sharded)} regions ({start}-{end} of {total_count})")
+    # Use Striped (Modulo) Sharding to balance load
+    # e.g., Shard 0 gets indices 0, 20, 40...
+    # This mixes heavy regions (Seoul) and light regions (Gangwon) across all shards.
+    sharded = all_targets[shard_index::shard_total]
+    print(f"🧩 Shard {shard_index}/{shard_total} (Striped): Processing {len(sharded)} regions")
     
     return sharded
 
