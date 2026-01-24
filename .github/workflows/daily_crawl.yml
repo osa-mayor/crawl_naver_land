@@ -114,36 +114,39 @@ jobs:
             echo "db_count=0" >> $GITHUB_OUTPUT
           fi
 
-      - name: 1. Generate Excel Files (Skip if failed)
-        id: gen_excel
+      - name: 1. Merge Shards
         if: steps.check_status.outputs.status == 'success'
-        continue-on-error: true
         run: |
-          echo "📊 Generating Excel files from Partial DBs..."
-          for db_file in db_*.db; do
-            id_name=$(echo "$db_file" | sed 's/^db_//' | sed 's/\.db$//')
-            date_str=$(date +'%Y-%m-%d')
-            excel_name="${date_str}_${id_name}.xlsx"
-            python export_db.py "$db_file" --output "$excel_name"
-          done
+          echo "🔄 Merging 20 shards into master db..."
+          python merge_db.py "db_shard_*.db" merged.db
 
-      - name: 2. Archive to Private GitHub Repo (Split DBs)
+      - name: 2. Generate Consolidated Excel
         if: steps.check_status.outputs.status == 'success'
         continue-on-error: true
         run: |
-          cp db_*.db private_db/
+          echo "📊 Generating Excel from Merged DB..."
+          date_str=$(date +'%Y-%m-%d')
+          excel_name="export_naver_land_${date_str}.xlsx"
+          python export_db.py merged.db --output "$excel_name"
+
+      - name: 3. Archive to Private GitHub Repo
+        if: steps.check_status.outputs.status == 'success'
+        continue-on-error: true
+        run: |
+          # Archive only the merged DB to save space/clutter
+          cp merged.db private_db/
           cd private_db
           git config user.name "GitHub Action"
           git config user.email "action@github.com"
-          git add db_*.db
+          git add merged.db
           if git diff --staged --quiet; then
             echo "No changes to commit."
           else
-            git commit -m "Update DBs: $(date +'%Y-%m-%d')"
+            git commit -m "Update DB: $(date +'%Y-%m-%d')"
             git push
           fi
 
-      - name: 3. Backup to Google Drive
+      - name: 4. Backup to Google Drive
         if: steps.check_status.outputs.status == 'success'
         continue-on-error: true
         env:
@@ -155,10 +158,9 @@ jobs:
           else
             shopt -s nullglob
 
-            for db in private_db/db_*.db; do
-              python upload_drive.py --files "$db" --folder "$GDRIVE_FOLDER_ID" --token "$GDRIVE_TOKEN"
-            done
-
+            # Upload Merged DB and Merged Excel
+            python upload_drive.py --files "merged.db" --folder "$GDRIVE_FOLDER_ID" --token "$GDRIVE_TOKEN"
+            
             for xlsx in *.xlsx; do
               python upload_drive.py --files "$xlsx" --folder "$GDRIVE_FOLDER_ID" --token "$GDRIVE_TOKEN"
             done
