@@ -5,7 +5,7 @@ import random
 import pandas as pd
 from playwright.async_api import async_playwright
 import logging
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
 import os
 import sqlite3
 import argparse
@@ -620,7 +620,7 @@ class NaverLandPlaywright:
                     "건폐율": bcr,
                     "위도": lat,
                     "경도": long,
-                    "수집일": datetime.now().strftime("%Y-%m-%d"),
+                    "수집일": datetime.now(timezone(timedelta(hours=9))).strftime("%Y-%m-%d"),
                     "complex_id": cid
                 })
 

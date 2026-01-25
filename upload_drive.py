@@ -22,8 +22,9 @@ def authenticate_drive_oauth(token_json_content):
 def upload_file(service, file_path, folder_id):
     """Upload or Update a file in the specific folder"""
     file_name = os.path.basename(file_path)
-    from datetime import datetime
-    date_str = datetime.now().strftime("%Y-%m-%d")
+    from datetime import datetime, timezone, timedelta
+    KST = timezone(timedelta(hours=9))
+    date_str = datetime.now(KST).strftime("%Y-%m-%d")
     upload_name = f"{date_str}_{file_name}"
 
     file_metadata = {
