@@ -584,9 +584,11 @@ class NaverLandPlaywright:
                 sido = ""
                 gungu = ""
 
-                # ✅ dong_name이 "서울시 강남구 신사동"으로 들어오더라도,
-                # 엑셀/df에서는 읍/면/동은 마지막 토큰(신사동)만 유지
-                dong = complex_info.get("_dong_name", "")
+                # ✅ Preserve original full path for fallback (before cleaning)
+                dong_full_path = complex_info.get("_dong_name", "")
+
+                # Clean dong to leaf token for display
+                dong = dong_full_path
                 if dong and isinstance(dong, str) and " " in dong:
                     dong = dong.split()[-1]
                 if not dong:
@@ -612,14 +614,13 @@ class NaverLandPlaywright:
                     if len(parts) >= 2: gungu = parts[1]
                     if len(parts) >= 3 and not dong: dong = parts[2]
                 
-                # ✅ Fallback for Sharding Mode (where self.region_name is missing)
-                # Parse from 'dong' variable which holds full path from URL list
-                if (not sido or not gungu) and dong and " " in dong:
-                     d_parts = dong.split()
-                     if len(d_parts) >= 3:
-                         sido = sido or d_parts[0]
-                         gungu = gungu or d_parts[1]
-                         # dong will be cleaned up in next step                   
+                # ✅ Fallback: Use ORIGINAL full path (dong_full_path, not cleaned dong)
+                if (not sido or not gungu) and dong_full_path and " " in dong_full_path:
+                    d_parts = dong_full_path.split()
+                    if len(d_parts) >= 3:
+                        sido = sido or d_parts[0]
+                        gungu = gungu or d_parts[1]
+                        # dong already cleaned above                   
                 approval_date = complex_info.get("useApprovalDate", "")
 
                 results.append({
