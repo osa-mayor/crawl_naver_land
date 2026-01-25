@@ -351,7 +351,29 @@ class NaverLandPlaywright:
                     # Enforce Hard Timeout (30s) to prevent infinite hangs
                     await asyncio.wait_for(self._visit_detail_page(page, detail_url), timeout=30.0)
                 except asyncio.TimeoutError:
-                    logging.warning(f"⏰ Timeout visiting {cid} ({t_type}) - skipping.")
+                    logging.warning(f"⏰ Timeout visiting {cid} ({t_type}) - Recoving Page...")
+                    try:
+                        # ⚠️ Critical: Page might be stuck in bad state. Recreate it.
+                        await page.close()
+                    except:
+                        pass
+                    
+                    try:
+                        # Create fresh page from context
+                        context = page.context
+                        page = await context.new_page()
+                        
+                        # Re-apply Stealth
+                        await page.add_init_script("""
+                            Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
+                        """)
+                        
+                        # Re-attach Listener
+                        page.on("response", handle_response)
+                        logging.info("♻️ Page recreated successfully. Continuing...")
+                    except Exception as recreate_e:
+                        logging.error(f"❌ Failed to recreate page: {recreate_e}")
+
                 except Exception as e:
                     logging.warning(f"Nav error {cid}: {e}")
 
