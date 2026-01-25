@@ -348,24 +348,32 @@ class NaverLandPlaywright:
                 detail_url = f"https://fin.land.naver.com/complexes/{cid}?tab=article&tradeType={t_type}&articleTradeTypes={t_type}&articleSortingType=PRICE_ASC"
 
                 try:
-                    await page.goto(detail_url, wait_until="domcontentloaded", timeout=45000)
-                    await page.wait_for_timeout(random.uniform(500, 1000))
-
-                    last_height = await page.evaluate("document.body.scrollHeight")
-                    no_change = 0
-                    for _ in range(30):
-                        await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
-                        await page.wait_for_timeout(random.uniform(300, 600))
-                        new_height = await page.evaluate("document.body.scrollHeight")
-                        if new_height == last_height:
-                            no_change += 1
-                            if no_change >= 2:
-                                break
-                        else:
-                            no_change = 0
-                        last_height = new_height
+                    # Enforce Hard Timeout (30s) to prevent infinite hangs
+                    await asyncio.wait_for(self._visit_detail_page(page, detail_url), timeout=30.0)
+                except asyncio.TimeoutError:
+                    logging.warning(f"⏰ Timeout visiting {cid} ({t_type}) - skipping.")
                 except Exception as e:
                     logging.warning(f"Nav error {cid}: {e}")
+
+    async def _visit_detail_page(self, page, url):
+        """Helper to visit page and perform scrolling"""
+        # Reduce internal timeout to fail faster
+        await page.goto(url, wait_until="domcontentloaded", timeout=20000)
+        await page.wait_for_timeout(random.uniform(500, 1000))
+
+        last_height = await page.evaluate("document.body.scrollHeight")
+        no_change = 0
+        for _ in range(30):
+            await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+            await page.wait_for_timeout(random.uniform(300, 600))
+            new_height = await page.evaluate("document.body.scrollHeight")
+            if new_height == last_height:
+                no_change += 1
+                if no_change >= 2:
+                    break
+            else:
+                no_change = 0
+            last_height = new_height
 
     def process_data(self):
         processor = DataProcessor()
