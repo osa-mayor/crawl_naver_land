@@ -578,13 +578,18 @@ class NaverLandPlaywright:
 
                 if not sido and hasattr(self, "region_name"):
                     parts = self.region_name.split()
-                    if len(parts) >= 1:
-                        sido = parts[0]
-                    if len(parts) >= 2:
-                        gungu = parts[1]
-                    if len(parts) >= 3 and not dong:
-                        dong = parts[2]
-
+                    if len(parts) >= 1: sido = parts[0]
+                    if len(parts) >= 2: gungu = parts[1]
+                    if len(parts) >= 3 and not dong: dong = parts[2]
+                
+                # ✅ Fallback for Sharding Mode (where self.region_name is missing)
+                # Parse from 'dong' variable which holds full path from URL list
+                if (not sido or not gungu) and dong and " " in dong:
+                     d_parts = dong.split()
+                     if len(d_parts) >= 3:
+                         sido = sido or d_parts[0]
+                         gungu = gungu or d_parts[1]
+                         # dong will be cleaned up in next step                   
                 approval_date = complex_info.get("useApprovalDate", "")
 
                 results.append({
