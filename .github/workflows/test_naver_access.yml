@@ -9,96 +9,38 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
       - name: Show Runner IP
         run: |
-          echo "🌐 Runner IP Address:"
+          echo "Runner IP Address:"
           curl -s https://ifconfig.me
           echo ""
 
-      - name: Test 1 - curl to fin.land.naver.com
+      - name: Test 1 - curl fin.land.naver.com
         run: |
-          echo "📡 Testing curl to fin.land.naver.com..."
-          HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" \
-            -H "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36" \
-            -H "Accept-Language: ko-KR,ko;q=0.9" \
-            --connect-timeout 30 \
-            --max-time 60 \
-            "https://fin.land.naver.com/regions?si=1100000000")
-          echo "HTTP Status Code: $HTTP_CODE"
-          if [ "$HTTP_CODE" == "200" ]; then
-            echo "✅ fin.land.naver.com is ACCESSIBLE"
-          elif [ "$HTTP_CODE" == "000" ]; then
-            echo "❌ Connection FAILED (timeout or reset)"
-          else
-            echo "⚠️ Got response but status: $HTTP_CODE"
-          fi
+          HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" -H "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0" --connect-timeout 30 --max-time 60 "https://fin.land.naver.com/regions?si=1100000000")
+          echo "fin.land.naver.com -> HTTP $HTTP_CODE"
 
-      - name: Test 2 - curl to new.land.naver.com
+      - name: Test 2 - curl new.land.naver.com
         run: |
-          echo "📡 Testing curl to new.land.naver.com..."
-          HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" \
-            -H "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36" \
-            -H "Accept-Language: ko-KR,ko;q=0.9" \
-            --connect-timeout 30 \
-            --max-time 60 \
-            "https://new.land.naver.com")
-          echo "HTTP Status Code: $HTTP_CODE"
-          if [ "$HTTP_CODE" == "200" ]; then
-            echo "✅ new.land.naver.com is ACCESSIBLE"
-          elif [ "$HTTP_CODE" == "000" ]; then
-            echo "❌ Connection FAILED (timeout or reset)"
-          else
-            echo "⚠️ Got response but status: $HTTP_CODE"
-          fi
+          HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" -H "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0" --connect-timeout 30 --max-time 60 "https://new.land.naver.com")
+          echo "new.land.naver.com -> HTTP $HTTP_CODE"
 
-      - name: Test 3 - curl to naver.com (control test)
+      - name: Test 3 - curl naver.com (control)
         run: |
-          echo "📡 Testing curl to naver.com (control)..."
-          HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" \
-            --connect-timeout 30 \
-            --max-time 60 \
-            "https://www.naver.com")
-          echo "HTTP Status Code: $HTTP_CODE"
-          if [ "$HTTP_CODE" == "200" ]; then
-            echo "✅ naver.com is ACCESSIBLE (control passed)"
-          elif [ "$HTTP_CODE" == "000" ]; then
-            echo "❌ Connection FAILED"
-          else
-            echo "⚠️ Got response but status: $HTTP_CODE"
-          fi
+          HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" --connect-timeout 30 --max-time 60 "https://www.naver.com")
+          echo "naver.com -> HTTP $HTTP_CODE"
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.10'
 
       - name: Test 4 - Playwright browser test
         run: |
           pip install playwright
           playwright install chromium
           playwright install-deps
-          python -c "
-import asyncio
-from playwright.async_api import async_playwright
-
-async def test():
-    async with async_playwright() as p:
-        browser = await p.chromium.launch(headless=True, args=['--no-sandbox'])
-        context = await browser.new_context(
-            user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
-        )
-        page = await context.new_page()
-        
-        urls = [
-            'https://fin.land.naver.com/regions?si=1100000000',
-            'https://fin.land.naver.com/regions?si=5100000000&gun=5115000000',
-        ]
-        
-        for url in urls:
-            try:
-                resp = await page.goto(url, wait_until='domcontentloaded', timeout=30000)
-                status = resp.status if resp else 'No response'
-                title = await page.title()
-                print(f'✅ {url} -> Status: {status}, Title: {title}')
-            except Exception as e:
-                print(f'❌ {url} -> Error: {e}')
-        
-        await browser.close()
-
-asyncio.run(test())
-"
+          python test_naver_connection.py
