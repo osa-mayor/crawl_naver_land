@@ -6,7 +6,7 @@ on:
 jobs:
   test:
     name: Test Naver Land Access
-    runs-on: ubuntu-latest
+    runs-on: self-hosted
 
     steps:
       - name: Checkout

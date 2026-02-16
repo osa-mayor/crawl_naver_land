@@ -9,7 +9,7 @@ on:
 jobs:
   crawl:
     name: Crawl Shard ${{ matrix.shard }}
-    runs-on: ubuntu-latest
+    runs-on: self-hosted
     strategy:
       fail-fast: false
       matrix:
@@ -51,7 +51,7 @@ jobs:
 
       - name: Run Crawler
         env:
-          MAX_CONCURRENT_PAGES: 3 # Lower concurrency per shard to be safe
+          MAX_CONCURRENT_PAGES: 1 # Strictly limit to 1 page to avoid residential IP block
         run: |
           echo "🚀 Processing Shard: ${{ matrix.shard }}/20"
           python crawler.py --shard-index ${{ matrix.shard }} --shard-total 20 --db-path db_shard_${{ matrix.shard }}.db
@@ -73,7 +73,7 @@ jobs:
 
   archive-and-backup:
     needs: crawl
-    runs-on: ubuntu-latest
+    runs-on: self-hosted
     if: always()
 
     steps:
