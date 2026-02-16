@@ -15,6 +15,7 @@ jobs:
         shell: powershell
     env:
       PYTHONUTF8: 1
+      PYTHONUNBUFFERED: 1
     strategy:
       fail-fast: false
       matrix:
