@@ -10,6 +10,9 @@ jobs:
   crawl:
     name: Crawl Shard ${{ matrix.shard }}
     runs-on: self-hosted
+    defaults:
+      run:
+        shell: bash
     strategy:
       fail-fast: false
       matrix:
@@ -47,7 +50,9 @@ jobs:
       - name: Install Playwright Browsers
         run: |
           playwright install chromium
-          playwright install-deps
+          if [ "${{ runner.os }}" != "Windows" ]; then
+            playwright install-deps
+          fi
 
       - name: Run Crawler
         env:
@@ -74,6 +79,9 @@ jobs:
   archive-and-backup:
     needs: crawl
     runs-on: self-hosted
+    defaults:
+      run:
+        shell: bash
     if: always()
 
     steps:
