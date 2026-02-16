@@ -9,12 +9,9 @@ on:
 permissions:
   contents: write
 
-
 jobs:
   validate-regions:
-    runs-on: ubuntu-latest
-    container:
-      image: mcr.microsoft.com/playwright/python:v1.40.0-jammy
+    runs-on: self-hosted
     
     steps:
       - name: Checkout Code
@@ -30,6 +27,7 @@ jobs:
       - name: Install Dependencies
         run: |
           pip install pandas playwright
+          playwright install chromium
 
       - name: Run Region Validator
         run: |
@@ -40,9 +38,10 @@ jobs:
           git config user.name "GitHub Action"
           git config user.email "action@github.com"
           git add naver_region_codes.json
-          if git diff --staged --quiet; then
+          if (git diff --staged --quiet) {
             echo "No changes in region validity."
-          else
-            git commit -m "Update region validity: $(date +'%Y-%m-%d')"
+          } else {
+            git commit -m "Update region validity: $(Get-Date -Format 'yyyy-MM-dd')"
             git push
-          fi
+          }
+        shell: pwsh
