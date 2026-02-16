@@ -1102,7 +1102,7 @@ def get_sharded_targets(shard_index, shard_total):
         return []
 
     sharded = all_targets[shard_index::shard_total]
-    print(f"🧩 샤드 {shard_index}/{shard_total} (스트라이프 방식): 총 {len(sharded)}개 지역 처리 예정")
+    print(f"[Shard] {shard_index}/{shard_total} (Stripe): Processing {len(sharded)} regions")
 
     return sharded
 
@@ -1118,7 +1118,7 @@ async def main():
     global DB_PATH
     if args.db_path:
         DB_PATH = args.db_path
-        print(f"🔧 Config Override: DB Path set to {DB_PATH}")
+        print(f"[Config] Override: DB Path set to {DB_PATH}")
 
     init_db()
 
@@ -1127,13 +1127,13 @@ async def main():
 
     # Case A: Sharding Mode
     if args.shard_index is not None and args.shard_total is not None:
-        print(f"⚡ Sharding Enabled: Index {args.shard_index} / Total {args.shard_total}")
+        print(f"[Shard] Sharding Enabled: Index {args.shard_index} / Total {args.shard_total}")
         direct_targets = get_sharded_targets(args.shard_index, args.shard_total)
 
     # Case B: Manual Region List
     elif args.regions:
         target_regions_config = args.regions
-        print(f"🔧 Config Override: Target Regions set to {target_regions_config}")
+        print(f"[Config] Override: Target Regions set to {target_regions_config}")
 
         for target in target_regions_config:
             subregions = get_subregions(target)
