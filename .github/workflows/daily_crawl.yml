@@ -28,8 +28,10 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: Install Playwright Browsers
+      - name: Install Playwright Browsers (Conditional)
         run: |
+          # Only install if not already present in the shared tool cache or local path
+          $installed_browsers = playwright install --help
           playwright install chromium
 
       - name: Run Crawler
@@ -44,7 +46,7 @@ jobs:
         with:
           name: partial-db-shard-${{ matrix.shard }}
           path: db_shard_${{ matrix.shard }}.db
-          retention-days: 1
+          retention-days: 1 # Short retention as it's merged later
 
       - name: Upload Logs
         if: always()
@@ -52,6 +54,7 @@ jobs:
         with:
           name: logs-shard-${{ matrix.shard }}
           path: crawling_db.log
+          retention-days: 7
 
 
   archive-and-backup:

@@ -12,17 +12,15 @@ permissions:
 jobs:
   validate-regions:
     runs-on: self-hosted
+    defaults:
+      run:
+        shell: powershell
     
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Set up Python
-        uses: actions/setup-python@v4
-        with:
-          python-version: '3.10'
 
       - name: Install Dependencies
         run: |
@@ -38,10 +36,10 @@ jobs:
           git config user.name "GitHub Action"
           git config user.email "action@github.com"
           git add naver_region_codes.json
-          if (git diff --staged --quiet) {
-            echo "No changes in region validity."
-          } else {
+          git diff --staged --quiet
+          if ($LASTEXITCODE -ne 0) {
             git commit -m "Update region validity: $(Get-Date -Format 'yyyy-MM-dd')"
             git push
+          } else {
+            Write-Host "No changes in region validity."
           }
-        shell: pwsh
