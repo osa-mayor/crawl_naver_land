@@ -38,7 +38,7 @@ jobs:
 
       - name: Run Crawler
         env:
-          MAX_CONCURRENT_PAGES: 1 # Strictly limit to 1 page to avoid residential IP block
+          MAX_CONCURRENT_PAGES: 3 # Increased from 1 to speed up (Total ~10h expected)
         run: |
           Write-Host "🚀 Processing Shard: ${{ matrix.shard }}/20"
           python crawler.py --shard-index ${{ matrix.shard }} --shard-total 20 --db-path db_shard_${{ matrix.shard }}.db
