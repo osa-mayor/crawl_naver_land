@@ -29,6 +29,7 @@ EXCLUDE_LOW_FLOORS = False
 
 # [System Config]
 MAX_CONCURRENT_PAGES = int(os.getenv("MAX_CONCURRENT_PAGES", 3))  # Configurable via Env Var
+MAX_API_PREFETCH_CONCURRENCY = int(os.getenv("MAX_API_PREFETCH_CONCURRENCY", 6))
 HEADLESS_MODE = True      # Set to False to watch process
 DB_PATH = "real_estate.db" # SQLite Database File
 
@@ -290,7 +291,7 @@ class NaverLandPlaywright:
 
         logging.info(f"⚡ Pre-fetching details for {len(filtered_cids)} complexes concurrently...")
 
-        sem_api = asyncio.Semaphore(20)
+        sem_api = asyncio.Semaphore(MAX_API_PREFETCH_CONCURRENCY)
 
         async def sem_task(cid):
             async with sem_api:
