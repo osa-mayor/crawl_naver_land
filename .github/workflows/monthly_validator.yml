@@ -11,10 +11,10 @@ permissions:
 
 jobs:
   validate-regions:
-    runs-on: self-hosted
+    runs-on: [self-hosted, macOS]
     defaults:
       run:
-        shell: powershell
+        shell: bash
     
     steps:
       - name: Checkout Code
@@ -36,10 +36,9 @@ jobs:
           git config user.name "GitHub Action"
           git config user.email "action@github.com"
           git add naver_region_codes.json
-          git diff --staged --quiet
-          if ($LASTEXITCODE -ne 0) {
-            git commit -m "Update region validity: $(Get-Date -Format 'yyyy-MM-dd')"
+          if ! git diff --staged --quiet; then
+            git commit -m "Update region validity: $(date +'%Y-%m-%d')"
             git push
-          } else {
-            Write-Host "No changes in region validity."
-          }
+          else
+            echo "No changes in region validity."
+          fi

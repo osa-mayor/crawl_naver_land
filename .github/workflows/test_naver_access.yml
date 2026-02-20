@@ -6,11 +6,11 @@ on:
 jobs:
   test:
     name: Test Naver Land Access
-    runs-on: self-hosted
+    runs-on: [self-hosted, macOS]
 
     defaults:
       run:
-        shell: powershell
+        shell: bash
 
     steps:
       - name: Checkout
@@ -18,29 +18,29 @@ jobs:
 
       - name: Show Runner IP
         run: |
-          Write-Host "Runner IP Address:"
-          curl.exe -L -s https://ifconfig.me
-          Write-Host ""
+          echo "Runner IP Address:"
+          curl -L -s https://ifconfig.me
+          echo ""
 
       - name: Test 1 - curl fin.land.naver.com
         continue-on-error: true
         run: |
-          $HTTP_CODE = (curl.exe -L -s -o /dev/null -w "%{http_code}" -H "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0" --connect-timeout 30 --max-time 60 "https://fin.land.naver.com/regions?si=1100000000")
-          Write-Host "fin.land.naver.com -> HTTP $HTTP_CODE"
+          HTTP_CODE=$(curl -L -s -o /dev/null -w "%{http_code}" -H "User-Agent: Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) Chrome/120.0.0.0" --connect-timeout 30 --max-time 60 "https://fin.land.naver.com/regions?si=1100000000" || true)
+          echo "fin.land.naver.com -> HTTP ${HTTP_CODE}"
           exit 0
 
       - name: Test 2 - curl new.land.naver.com
         continue-on-error: true
         run: |
-          $HTTP_CODE = (curl.exe -L -s -o /dev/null -w "%{http_code}" -H "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0" --connect-timeout 30 --max-time 60 "https://new.land.naver.com")
-          Write-Host "new.land.naver.com -> HTTP $HTTP_CODE"
+          HTTP_CODE=$(curl -L -s -o /dev/null -w "%{http_code}" -H "User-Agent: Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) Chrome/120.0.0.0" --connect-timeout 30 --max-time 60 "https://new.land.naver.com" || true)
+          echo "new.land.naver.com -> HTTP ${HTTP_CODE}"
           exit 0
 
       - name: Test 3 - curl naver.com (control)
         continue-on-error: true
         run: |
-          $HTTP_CODE = (curl.exe -L -s -o /dev/null -w "%{http_code}" --connect-timeout 30 --max-time 60 "https://www.naver.com")
-          Write-Host "naver.com -> HTTP $HTTP_CODE"
+          HTTP_CODE=$(curl -L -s -o /dev/null -w "%{http_code}" --connect-timeout 30 --max-time 60 "https://www.naver.com" || true)
+          echo "naver.com -> HTTP ${HTTP_CODE}"
           exit 0
 
       - name: Playwright Browser Test

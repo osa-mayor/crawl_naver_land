@@ -2,8 +2,7 @@ name: Daily Land Crawler
 
 on:
   schedule:
-    # KST 01:00 AM = UTC 16:00 PM (Previous Day)
-    - cron: '0 16 * * *'
+    - cron: '0 16 * * 0,3'
   workflow_dispatch:
 
 concurrency:
@@ -13,10 +12,10 @@ concurrency:
 jobs:
   crawl:
     name: Crawl Shard ${{ matrix.shard }}
-    runs-on: self-hosted
+    runs-on: [self-hosted, macOS]
     defaults:
       run:
-        shell: powershell
+        shell: bash
     env:
       PYTHONUTF8: 1
       PYTHONUNBUFFERED: 1
@@ -38,8 +37,6 @@ jobs:
 
       - name: Install Playwright Browsers (Conditional)
         run: |
-          # Only install if not already present in the shared tool cache or local path
-          $installed_browsers = playwright install --help
           playwright install chromium
 
       - name: Run Crawler
@@ -47,7 +44,7 @@ jobs:
           MAX_CONCURRENT_PAGES: 1
           MAX_API_PREFETCH_CONCURRENCY: 6
         run: |
-          Write-Host "🚀 Processing Shard: ${{ matrix.shard }}/20"
+          echo "🚀 Processing Shard: ${{ matrix.shard }}/20"
           python crawler.py --shard-index ${{ matrix.shard }} --shard-total 20 --db-path db_shard_${{ matrix.shard }}.db
 
       - name: Upload Partial DB
@@ -68,10 +65,10 @@ jobs:
 
   archive-and-backup:
     needs: crawl
-    runs-on: self-hosted
+    runs-on: [self-hosted, macOS]
     defaults:
       run:
-        shell: powershell
+        shell: bash
     if: always()
 
     steps:
@@ -99,19 +96,21 @@ jobs:
       - name: Check Crawl Status
         id: check_status
         run: |
-          $dbs = Get-ChildItem -Path "db_shard_*.db" -ErrorAction SilentlyContinue
-          if ($dbs) {
-            echo "status=success" >> $env:GITHUB_OUTPUT
-            echo "db_count=$($dbs.Count)" >> $env:GITHUB_OUTPUT
-          } else {
-            echo "status=failure" >> $env:GITHUB_OUTPUT
-            echo "db_count=0" >> $env:GITHUB_OUTPUT
-          }
+          shopt -s nullglob
+          dbs=(db_shard_*.db)
+          db_count=${#dbs[@]}
+          if [ "$db_count" -gt 0 ]; then
+            echo "status=success" >> "$GITHUB_OUTPUT"
+            echo "db_count=$db_count" >> "$GITHUB_OUTPUT"
+          else
+            echo "status=failure" >> "$GITHUB_OUTPUT"
+            echo "db_count=0" >> "$GITHUB_OUTPUT"
+          fi
 
       - name: 1. Merge Shards
         if: steps.check_status.outputs.status == 'success'
         run: |
-          Write-Host "🔄 Merging shards into master db..."
+          echo "🔄 Merging shards into master db..."
           python merge_db.py "db_shard_*.db" merged.db
 
       - name: 2. Generate Consolidated Excels
@@ -119,43 +118,37 @@ jobs:
         if: steps.check_status.outputs.status == 'success'
         continue-on-error: true
         run: |
-          Write-Host "📊 Generating Excel Reports..."
-          $date_str = Get-Date -Format "yyyy-MM-dd"
-          
-          # 1. Seoul (Min 100)
-          Write-Host "Processing Seoul..."
+          echo "📊 Generating Excel Reports..."
+          date_str="$(date +'%Y-%m-%d')"
+
+          echo "Processing Seoul..."
           python export_db.py merged.db --output "export_${date_str}_Seoul.xlsx" --min-households 100 --region "서울시"
-          
-          # 2. Gyeonggi (Min 100)
-          Write-Host "Processing Gyeonggi..."
+
+          echo "Processing Gyeonggi..."
           python export_db.py merged.db --output "export_${date_str}_Gyeonggi.xlsx" --min-households 100 --region "경기도"
-          
-          # 3. Metros (Min 100)
-          Write-Host "Processing Metros..."
+
+          echo "Processing Metros..."
           python export_db.py merged.db --output "export_${date_str}_Metros.xlsx" --min-households 100 --region "인천시 부산시 대구시 광주시 대전시 울산시 세종시"
 
-          # 4. Provinces (Min 100)
-          Write-Host "Processing Provinces..."
+          echo "Processing Provinces..."
           python export_db.py merged.db --output "export_${date_str}_Provinces.xlsx" --min-households 100 --region "강원도 충청북도 충청남도 경상북도 경상남도 전북도 전라남도 제주도"
 
       - name: 3. Archive to Private GitHub Repo
         if: steps.check_status.outputs.status == 'success'
         continue-on-error: true
         run: |
-          # Archive only the merged DB to save space/clutter
-          Copy-Item merged.db private_db/
-          Push-Location private_db
+          cp merged.db private_db/
+          pushd private_db
           git config user.name "GitHub Action"
           git config user.email "action@github.com"
           git add merged.db
-          git diff --staged --quiet
-          if ($LASTEXITCODE -ne 0) {
-            git commit -m "Update DB: $(Get-Date -Format 'yyyy-MM-dd')"
+          if ! git diff --staged --quiet; then
+            git commit -m "Update DB: $(date +'%Y-%m-%d')"
             git push
-          } else {
-            Write-Host "No changes to commit."
-          }
-          Pop-Location
+          else
+            echo "No changes to commit."
+          fi
+          popd
 
       - name: 4. Backup to Google Drive
         if: steps.check_status.outputs.status == 'success'
@@ -164,18 +157,16 @@ jobs:
           GDRIVE_TOKEN: ${{ secrets.GDRIVE_TOKEN }}
           GDRIVE_FOLDER_ID: ${{ secrets.GDRIVE_FOLDER_ID }}
         run: |
-          if (-not $env:GDRIVE_TOKEN) {
-            Write-Host "⚠️ Google Drive Secrets (GDRIVE_TOKEN) missing."
-          } else {
-            # Upload Merged DB
-            python upload_drive.py --files "merged.db" --folder "$($env:GDRIVE_FOLDER_ID)" --token "$($env:GDRIVE_TOKEN)"
-            
-            # Upload Excel Files
-            $xlsx_files = Get-ChildItem -Path "*.xlsx" -ErrorAction SilentlyContinue
-            foreach ($file in $xlsx_files) {
-              python upload_drive.py --files "$($file.Name)" --folder "$($env:GDRIVE_FOLDER_ID)" --token "$($env:GDRIVE_TOKEN)"
-            }
-          }
+          if [ -z "${GDRIVE_TOKEN:-}" ]; then
+            echo "⚠️ Google Drive Secrets (GDRIVE_TOKEN) missing."
+          else
+            python upload_drive.py --files "merged.db" --folder "$GDRIVE_FOLDER_ID" --token "$GDRIVE_TOKEN"
+
+            for file in *.xlsx; do
+              [ -e "$file" ] || continue
+              python upload_drive.py --files "$file" --folder "$GDRIVE_FOLDER_ID" --token "$GDRIVE_TOKEN"
+            done
+          fi
 
       - name: 4. Send Discord Notification
         if: always()
@@ -183,18 +174,20 @@ jobs:
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
           GDRIVE_FOLDER_ID: ${{ secrets.GDRIVE_FOLDER_ID }}
         run: |
-          $CURRENT_DATE = Get-Date -Format "yyyy-MM-dd"
-          $DB_COUNT = "${{ steps.check_status.outputs.db_count }}"
-          $EXCEL_OUTCOME = "${{ steps.gen_excel.outcome }}"
+          CURRENT_DATE="$(date +'%Y-%m-%d')"
+          DB_COUNT="${{ steps.check_status.outputs.db_count }}"
+          EXCEL_OUTCOME="${{ steps.gen_excel.outcome }}"
 
-          if ("${{ steps.check_status.outputs.status }}" -ne "success") {
-            $MSG = "🚨 **[크롤링 실패]** $CURRENT_DATE DB 파일 생성/다운로드 실패 (db_*.db 없음). GitHub Actions 로그 확인!"
-          } else {
-            if ($EXCEL_OUTCOME -eq "failure") {
-              $MSG = "⚠️ **[부분 성공]** $CURRENT_DATE 크롤링/DB($DB_COUNT개) OK ✅ / 엑셀 변환 실패 ❌`n☁️ Google Drive: https://drive.google.com/drive/folders/$($env:GDRIVE_FOLDER_ID)"
-            } else {
-              $MSG = "✅ **[크롤링 성공]** $CURRENT_DATE DB($DB_COUNT개) + 엑셀 변환 OK`n☁️ Google Drive: https://drive.google.com/drive/folders/$($env:GDRIVE_FOLDER_ID)"
-            }
-          }
+          if [ "${{ steps.check_status.outputs.status }}" != "success" ]; then
+            MSG="🚨 **[크롤링 실패]** ${CURRENT_DATE} DB 파일 생성/다운로드 실패 (db_*.db 없음). GitHub Actions 로그 확인!"
+          elif [ "$EXCEL_OUTCOME" = "failure" ]; then
+            MSG="⚠️ **[부분 성공]** ${CURRENT_DATE} 크롤링/DB(${DB_COUNT}개) OK ✅ / 엑셀 변환 실패 ❌"
+            MSG+=$'\n'
+            MSG+="☁️ Google Drive: https://drive.google.com/drive/folders/${GDRIVE_FOLDER_ID}"
+          else
+            MSG="✅ **[크롤링 성공]** ${CURRENT_DATE} DB(${DB_COUNT}개) + 엑셀 변환 OK"
+            MSG+=$'\n'
+            MSG+="☁️ Google Drive: https://drive.google.com/drive/folders/${GDRIVE_FOLDER_ID}"
+          fi
 
-          python send_discord.py --message "$MSG" --webhook "$($env:DISCORD_WEBHOOK_URL)"
+          python send_discord.py --message "$MSG" --webhook "$DISCORD_WEBHOOK_URL"
