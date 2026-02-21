@@ -24,12 +24,12 @@ jobs:
 
       - name: Install Dependencies
         run: |
-          pip install pandas playwright
-          playwright install chromium
+          python3 -m pip install pandas playwright
+          python3 -m playwright install chromium
 
       - name: Run Region Validator
         run: |
-          python region_validator.py
+          python3 region_validator.py
 
       - name: Commit and Push Changes
         run: |

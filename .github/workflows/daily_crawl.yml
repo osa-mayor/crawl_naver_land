@@ -46,12 +46,12 @@ jobs:
 
       - name: Install Dependencies
         run: |
-          python -m pip install --upgrade pip
-          pip install -r requirements.txt
+          python3 -m pip install --upgrade pip
+          python3 -m pip install -r requirements.txt
 
       - name: Install Playwright Browsers (Conditional)
         run: |
-          playwright install chromium
+          python3 -m playwright install chromium
 
       - name: Run Crawler
         env:
@@ -63,7 +63,7 @@ jobs:
 
           for shard in $(seq "$SHARD_START" "$SHARD_END"); do
             echo "🚀 Processing Shard: ${shard}/20 (group ${{ matrix.shard_group }})"
-            if ! python crawler.py --shard-index "$shard" --shard-total 20 --db-path "db_shard_${shard}.db"; then
+            if ! python3 crawler.py --shard-index "$shard" --shard-total 20 --db-path "db_shard_${shard}.db"; then
               failed+=("$shard")
             fi
           done
@@ -117,8 +117,8 @@ jobs:
 
       - name: Install Dependencies
         run: |
-          pip install -r requirements.txt
-          pip install google-api-python-client google-auth-httplib2 google-auth-oauthlib
+          python3 -m pip install -r requirements.txt
+          python3 -m pip install google-api-python-client google-auth-httplib2 google-auth-oauthlib
 
       - name: Download All Partial DBs
         uses: actions/download-artifact@v4
@@ -144,7 +144,7 @@ jobs:
         if: steps.check_status.outputs.status == 'success'
         run: |
           echo "🔄 Merging shards into master db..."
-          python merge_db.py "db_shard_*.db" merged.db
+          python3 merge_db.py "db_shard_*.db" merged.db
 
       - name: 2. Generate Consolidated Excels
         id: gen_excel
@@ -155,16 +155,16 @@ jobs:
           date_str="$(date +'%Y-%m-%d')"
 
           echo "Processing Seoul..."
-          python export_db.py merged.db --output "export_${date_str}_Seoul.xlsx" --min-households 100 --region "서울시"
+          python3 export_db.py merged.db --output "export_${date_str}_Seoul.xlsx" --min-households 100 --region "서울시"
 
           echo "Processing Gyeonggi..."
-          python export_db.py merged.db --output "export_${date_str}_Gyeonggi.xlsx" --min-households 100 --region "경기도"
+          python3 export_db.py merged.db --output "export_${date_str}_Gyeonggi.xlsx" --min-households 100 --region "경기도"
 
           echo "Processing Metros..."
-          python export_db.py merged.db --output "export_${date_str}_Metros.xlsx" --min-households 100 --region "인천시 부산시 대구시 광주시 대전시 울산시 세종시"
+          python3 export_db.py merged.db --output "export_${date_str}_Metros.xlsx" --min-households 100 --region "인천시 부산시 대구시 광주시 대전시 울산시 세종시"
 
           echo "Processing Provinces..."
-          python export_db.py merged.db --output "export_${date_str}_Provinces.xlsx" --min-households 100 --region "강원도 충청북도 충청남도 경상북도 경상남도 전북도 전라남도 제주도"
+          python3 export_db.py merged.db --output "export_${date_str}_Provinces.xlsx" --min-households 100 --region "강원도 충청북도 충청남도 경상북도 경상남도 전북도 전라남도 제주도"
 
       - name: 3. Archive to Private GitHub Repo
         if: steps.check_status.outputs.status == 'success'
@@ -193,11 +193,11 @@ jobs:
           if [ -z "${GDRIVE_TOKEN:-}" ]; then
             echo "⚠️ Google Drive Secrets (GDRIVE_TOKEN) missing."
           else
-            python upload_drive.py --files "merged.db" --folder "$GDRIVE_FOLDER_ID" --token "$GDRIVE_TOKEN"
+            python3 upload_drive.py --files "merged.db" --folder "$GDRIVE_FOLDER_ID" --token "$GDRIVE_TOKEN"
 
             for file in *.xlsx; do
               [ -e "$file" ] || continue
-              python upload_drive.py --files "$file" --folder "$GDRIVE_FOLDER_ID" --token "$GDRIVE_TOKEN"
+              python3 upload_drive.py --files "$file" --folder "$GDRIVE_FOLDER_ID" --token "$GDRIVE_TOKEN"
             done
           fi
 
@@ -223,4 +223,4 @@ jobs:
             MSG+="☁️ Google Drive: https://drive.google.com/drive/folders/${GDRIVE_FOLDER_ID}"
           fi
 
-          python send_discord.py --message "$MSG" --webhook "$DISCORD_WEBHOOK_URL"
+          python3 send_discord.py --message "$MSG" --webhook "$DISCORD_WEBHOOK_URL"

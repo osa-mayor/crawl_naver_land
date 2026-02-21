@@ -45,4 +45,4 @@ jobs:
 
       - name: Playwright Browser Test
         run: |
-          python test_naver_connection.py
+          python3 test_naver_connection.py
