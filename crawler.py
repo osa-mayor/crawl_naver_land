@@ -16,9 +16,7 @@ from land_selectors import NaverLandSelectors
 # [Configuration]
 # ==========================================
 # Target Regions (Search by Name using naver_region_codes.json)
-TARGET_REGIONS = [
-    "경기도"
-]
+TARGET_REGIONS = ["경기도"]
 
 # (Optional) RAW URLs override or addition
 TARGET_URLS = []
@@ -28,26 +26,29 @@ MIN_HOUSEHOLDS = 0
 EXCLUDE_LOW_FLOORS = False
 
 # [System Config]
-MAX_CONCURRENT_PAGES = int(os.getenv("MAX_CONCURRENT_PAGES", 3))  # Configurable via Env Var
+MAX_CONCURRENT_PAGES = int(
+    os.getenv("MAX_CONCURRENT_PAGES", 3)
+)  # Configurable via Env Var
 MAX_API_PREFETCH_CONCURRENCY = int(os.getenv("MAX_API_PREFETCH_CONCURRENCY", 6))
-HEADLESS_MODE = True      # Set to False to watch process
-DB_PATH = "real_estate.db" # SQLite Database File
+HEADLESS_MODE = True  # Set to False to watch process
+DB_PATH = "real_estate.db"  # SQLite Database File
 
 # ==========================================
 
 logging.basicConfig(
     level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s',
+    format="%(asctime)s - %(levelname)s - %(message)s",
     handlers=[
         logging.StreamHandler(),
-        logging.FileHandler("crawling_db.log", encoding="utf-8")
-    ]
+        logging.FileHandler("crawling_db.log", encoding="utf-8"),
+    ],
 )
 
 # User-Agent List for Stealth
 USER_AGENTS = [
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
 ]
+
 
 class DataProcessor:
     @staticmethod
@@ -78,6 +79,7 @@ class NaverLandPlaywright:
     def __init__(self):
         self.complexes = {}
         self.captured_articles = {}
+        self.region_name = ""
 
     def get_context_options(self):
         ua = random.choice(USER_AGENTS)
@@ -88,7 +90,7 @@ class NaverLandPlaywright:
             "has_touch": False,
             "extra_http_headers": {
                 "Accept-Language": "ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7"
-            }
+            },
         }
 
     async def run_test(self, target_urls, headless=True):
@@ -100,7 +102,7 @@ class NaverLandPlaywright:
                     "--disable-blink-features=AutomationControlled",
                     "--no-sandbox",
                     "--disable-setuid-sandbox",
-                ]
+                ],
             )
 
             # Semaphore for limiting concurrency
@@ -110,9 +112,7 @@ class NaverLandPlaywright:
                 dong_name, url = item
                 async with sem:
                     # New Context per URL (Isolated cookies, Random UA)
-                    context = await browser.new_context(
-                        **self.get_context_options()
-                    )
+                    context = await browser.new_context(**self.get_context_options())
 
                     # Stealth scripts
                     page = await context.new_page()
@@ -122,7 +122,9 @@ class NaverLandPlaywright:
 
                     try:
                         logging.info(f"🚀 Processing: {dong_name} ({url})")
-                        await asyncio.sleep(random.uniform(0.5, 1.5))  # Random start delay
+                        await asyncio.sleep(
+                            random.uniform(0.5, 1.5)
+                        )  # Random start delay
                         await self.process_region_tab(page, url, dong_name)
                     except Exception as e:
                         logging.error(f"❌ Failed processing {url}: {e}")
@@ -165,7 +167,12 @@ class NaverLandPlaywright:
 
             # Robust Wait: Wait for API response that loads the list
             try:
-                async with page.expect_response(lambda response: "complex" in response.url and response.status == 200, timeout=10000):
+                async with page.expect_response(
+                    lambda response: (
+                        "complex" in response.url and response.status == 200
+                    ),
+                    timeout=10000,
+                ):
                     pass
             except:
                 pass  # Proceed
@@ -190,12 +197,14 @@ class NaverLandPlaywright:
 
         # 3. Extract Complexes
         try:
-            await page.wait_for_selector(NaverLandSelectors.COMPLEX_ITEM, state="attached", timeout=5000)
+            await page.wait_for_selector(
+                NaverLandSelectors.COMPLEX_ITEM, state="attached", timeout=5000
+            )
         except:
             logging.warning("Timeout waiting for complex list (or empty).")
 
         complex_items = await page.query_selector_all(NaverLandSelectors.COMPLEX_ITEM)
-        logging.info(f"🔍 Raw Complex Items Found: {len(complex_items)//6}")
+        logging.info(f"🔍 Raw Complex Items Found: {len(complex_items) // 6}")
 
         filtered_cids = []
 
@@ -220,7 +229,9 @@ class NaverLandPlaywright:
                 badge_el = await item.query_selector(NaverLandSelectors.COMPLEX_BADGE)
                 if badge_el:
                     badge_text = await badge_el.inner_text()
-                    if ("아파트" in badge_text or "분양권" in badge_text) and "오피스텔" not in badge_text:
+                    if (
+                        "아파트" in badge_text or "분양권" in badge_text
+                    ) and "오피스텔" not in badge_text:
                         is_apt = True
 
                 if not is_apt:
@@ -228,7 +239,9 @@ class NaverLandPlaywright:
 
                 # Households
                 households = 0
-                info_items = await item.query_selector_all(NaverLandSelectors.COMPLEX_INFO)
+                info_items = await item.query_selector_all(
+                    NaverLandSelectors.COMPLEX_INFO
+                )
                 for info in info_items:
                     text = await info.inner_text()
                     if "세대" in text:
@@ -238,14 +251,16 @@ class NaverLandPlaywright:
                             break
 
                 if households < MIN_HOUSEHOLDS:
-                    logging.info(f"Skipping {name}: Households {households} < {MIN_HOUSEHOLDS}")
+                    logging.info(
+                        f"Skipping {name}: Households {households} < {MIN_HOUSEHOLDS}"
+                    )
                     continue
 
                 # ✅ IMPORTANT: store dong_name (now full path 가능)
                 self.complexes[cid] = {
                     "name": name,
                     "households": households,
-                    "_dong_name": dong_name
+                    "_dong_name": dong_name,
                 }
                 filtered_cids.append(cid)
             except Exception:
@@ -254,7 +269,9 @@ class NaverLandPlaywright:
         logging.info(f"Target Count in Region: {len(filtered_cids)}")
         if not filtered_cids:
             await page.screenshot(path=f"debug_crawler_fail_{dong_name}.png")
-            logging.error(f"Saved debug screenshot to debug_crawler_fail_{dong_name}.png")
+            logging.error(
+                f"Saved debug screenshot to debug_crawler_fail_{dong_name}.png"
+            )
             return
 
         # ========================================================
@@ -262,7 +279,10 @@ class NaverLandPlaywright:
         # ========================================================
         async def fetch_one_complex(cid):
             # 1. Complex Detail
-            if cid not in self.complexes or "totalHouseholdNumber" not in self.complexes[cid]:
+            if (
+                cid not in self.complexes
+                or "totalHouseholdNumber" not in self.complexes[cid]
+            ):
                 try:
                     api_url = f"https://fin.land.naver.com/front-api/v1/complex?complexNumber={cid}"
                     api_res = await page.request.get(api_url)
@@ -271,8 +291,12 @@ class NaverLandPlaywright:
                         if "result" in data:
                             new_data = data["result"]
                             # Preserve custom fields from list
-                            if cid in self.complexes and isinstance(self.complexes[cid], dict):
-                                new_data["_dong_name"] = self.complexes[cid].get("_dong_name")
+                            if cid in self.complexes and isinstance(
+                                self.complexes[cid], dict
+                            ):
+                                new_data["_dong_name"] = self.complexes[cid].get(
+                                    "_dong_name"
+                                )
                             self.complexes[cid] = new_data
                 except:
                     pass
@@ -289,7 +313,9 @@ class NaverLandPlaywright:
                 except:
                     pass
 
-        logging.info(f"⚡ Pre-fetching details for {len(filtered_cids)} complexes concurrently...")
+        logging.info(
+            f"⚡ Pre-fetching details for {len(filtered_cids)} complexes concurrently..."
+        )
 
         sem_api = asyncio.Semaphore(MAX_API_PREFETCH_CONCURRENCY)
 
@@ -343,40 +369,53 @@ class NaverLandPlaywright:
 
         page.on("response", handle_response)
 
+        async def recreate_page(current_page):
+            context = current_page.context
+            try:
+                await current_page.close()
+            except Exception:
+                pass
+
+            new_page = await context.new_page()
+            await new_page.add_init_script("""
+                Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
+            """)
+            new_page.on("response", handle_response)
+            return new_page
+
+        async def visit_detail_with_retries(current_page, cid, t_type, retries=2):
+            detail_url = f"https://fin.land.naver.com/complexes/{cid}?tab=article&tradeType={t_type}&articleTradeTypes={t_type}&articleSortingType=PRICE_ASC"
+
+            for attempt in range(1, retries + 2):
+                try:
+                    await asyncio.wait_for(
+                        self._visit_detail_page(current_page, detail_url), timeout=30.0
+                    )
+                    return current_page
+                except asyncio.CancelledError:
+                    raise
+                except Exception as e:
+                    logging.warning(
+                        f"Nav error {cid} ({t_type}) attempt {attempt}/{retries + 1}: {e}"
+                    )
+                    if attempt > retries:
+                        return current_page
+
+                    try:
+                        current_page = await recreate_page(current_page)
+                        await asyncio.sleep(random.uniform(0.2, 0.6))
+                    except Exception as recreate_e:
+                        logging.error(
+                            f"Failed to recreate page for {cid}: {recreate_e}"
+                        )
+                        return current_page
+
+            return current_page
+
         # 5. Visit Details (Trigger article list)
         for cid in filtered_cids:
-            for t_type in ["A1", "B1"]:  # Trade, Jeonse
-                detail_url = f"https://fin.land.naver.com/complexes/{cid}?tab=article&tradeType={t_type}&articleTradeTypes={t_type}&articleSortingType=PRICE_ASC"
-
-                try:
-                    # Enforce Hard Timeout (30s) to prevent infinite hangs
-                    await asyncio.wait_for(self._visit_detail_page(page, detail_url), timeout=30.0)
-                except asyncio.TimeoutError:
-                    logging.warning(f"⏰ Timeout visiting {cid} ({t_type}) - Recoving Page...")
-                    try:
-                        # ⚠️ Critical: Page might be stuck in bad state. Recreate it.
-                        await page.close()
-                    except:
-                        pass
-                    
-                    try:
-                        # Create fresh page from context
-                        context = page.context
-                        page = await context.new_page()
-                        
-                        # Re-apply Stealth
-                        await page.add_init_script("""
-                            Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
-                        """)
-                        
-                        # Re-attach Listener
-                        page.on("response", handle_response)
-                        logging.info("♻️ Page recreated successfully. Continuing...")
-                    except Exception as recreate_e:
-                        logging.error(f"❌ Failed to recreate page: {recreate_e}")
-
-                except Exception as e:
-                    logging.warning(f"Nav error {cid}: {e}")
+            for t_type in ["A1", "B1"]:
+                page = await visit_detail_with_retries(page, cid, t_type)
 
     async def _visit_detail_page(self, page, url):
         """Helper to visit page and perform scrolling"""
@@ -436,7 +475,9 @@ class NaverLandPlaywright:
                 if not space and "supplySpaceName" in art:
                     space = art
                 s_name = space.get("supplySpaceName", str(space.get("supplySpace", "")))
-                e_name = space.get("exclusiveSpaceName", str(space.get("exclusiveSpace", "")))
+                e_name = space.get(
+                    "exclusiveSpaceName", str(space.get("exclusiveSpace", ""))
+                )
                 ptp_key = f"{s_name}_{e_name}"
 
                 if ptp_key not in groups:
@@ -453,16 +494,24 @@ class NaverLandPlaywright:
                         floor_str = detail.get("floorInfo", "-")
 
                 if floor_info:
-                    floor_str = f"{floor_info.get('targetFloor','')}/{floor_info.get('totalFloor','')}"
+                    floor_str = f"{floor_info.get('targetFloor', '')}/{floor_info.get('totalFloor', '')}"
 
                 art["_mapped_price"] = 0
 
                 price_info = art.get("priceInfo", {})
                 price = 0
                 if t_type in ["A1", "매매"]:
-                    price = price_info.get("dealPrice", 0) if price_info else art.get("dealPrice", 0)
+                    price = (
+                        price_info.get("dealPrice", 0)
+                        if price_info
+                        else art.get("dealPrice", 0)
+                    )
                 elif t_type in ["B1", "전세"]:
-                    price = price_info.get("warrantyPrice", 0) if price_info else art.get("warrantyPrice", 0)
+                    price = (
+                        price_info.get("warrantyPrice", 0)
+                        if price_info
+                        else art.get("warrantyPrice", 0)
+                    )
 
                 art["_mapped_price"] = price
                 art["_mapped_floor"] = floor_str
@@ -477,8 +526,16 @@ class NaverLandPlaywright:
                     return 0, 0, 0, 0, 0, 0
                 items.sort(key=lambda x: int(x.get("_mapped_price", 0)))
 
-                std = [x for x in items if not processor.is_low_floor(x.get("_mapped_floor", ""))]
-                spc = [x for x in items if processor.is_low_floor(x.get("_mapped_floor", ""))]
+                std = [
+                    x
+                    for x in items
+                    if not processor.is_low_floor(x.get("_mapped_floor", ""))
+                ]
+                spc = [
+                    x
+                    for x in items
+                    if processor.is_low_floor(x.get("_mapped_floor", ""))
+                ]
 
                 min_std = std[0]["_mapped_price"] if std else 0
                 min_spc = spc[0]["_mapped_price"] if spc else 0
@@ -491,7 +548,9 @@ class NaverLandPlaywright:
                 if not g["trade"] and not g["rent"]:
                     continue
 
-                tm_std, tm_spc, tm_min_total, tm_max, tm_avg, tm_cnt = get_stats(g["trade"])
+                tm_std, tm_spc, tm_min_total, tm_max, tm_avg, tm_cnt = get_stats(
+                    g["trade"]
+                )
                 _, _, rm_min_total, rm_max, rm_avg, rm_cnt = get_stats(g["rent"])
                 rm_min = rm_min_total
 
@@ -502,7 +561,7 @@ class NaverLandPlaywright:
                 if base_price > 0 and rm_min > 0:
                     gap_val = base_price - rm_min
                     gap = gap_val
-                    jeonse_ratio = (rm_min / base_price * 100)
+                    jeonse_ratio = rm_min / base_price * 100
 
                 info = g["info"]
                 space = info.get("spaceInfo", {}) or info
@@ -538,7 +597,10 @@ class NaverLandPlaywright:
                         p_supply = float(p.get("supplyArea", 0))
                         p_exclusive = float(p.get("exclusiveArea", 0))
                         target_exclusive = float(space.get("exclusiveSpace", 0))
-                        if abs(p_supply - target_space) < 0.1 and abs(p_exclusive - target_exclusive) < 0.1:
+                        if (
+                            abs(p_supply - target_space) < 0.1
+                            and abs(p_exclusive - target_exclusive) < 0.1
+                        ):
                             matched_pyeong = p
                             break
 
@@ -611,55 +673,64 @@ class NaverLandPlaywright:
 
                 if not sido and hasattr(self, "region_name"):
                     parts = self.region_name.split()
-                    if len(parts) >= 1: sido = parts[0]
-                    if len(parts) >= 2: gungu = parts[1]
-                    if len(parts) >= 3 and not dong: dong = parts[2]
-                
+                    if len(parts) >= 1:
+                        sido = parts[0]
+                    if len(parts) >= 2:
+                        gungu = parts[1]
+                    if len(parts) >= 3 and not dong:
+                        dong = parts[2]
+
                 # ✅ Fallback: Use ORIGINAL full path (dong_full_path, not cleaned dong)
                 if (not sido or not gungu) and dong_full_path and " " in dong_full_path:
                     d_parts = dong_full_path.split()
                     if len(d_parts) >= 3:
                         sido = sido or d_parts[0]
                         gungu = gungu or d_parts[1]
-                        # dong already cleaned above                   
+                        # dong already cleaned above
                 approval_date = complex_info.get("useApprovalDate", "")
 
-                results.append({
-                    "시/도": sido,
-                    "시/군/구": gungu,
-                    "읍/면/동": dong,
-                    "아파트명": cname,
-                    "준공일": approval_date,
-                    "총세대수": complex_info.get("totalHouseholdNumber", 0),
-                    "타입": space.get("supplySpaceName", "Unknown"),
-                    "공급면적": float(space.get("supplySpace", 0)),
-                    "전용면적": float(space.get("exclusiveSpace", 0)),
-                    "현관구조": hallway_type,
-                    "방/욕실": room_bath_str,
-                    "매매 최저가 (일반)": fmt(tm_std) if tm_cnt > 0 else "",
-                    "매매 최저가 (저층)": fmt(tm_spc) if tm_cnt > 0 else "",
-                    "매매 최고가": fmt(tm_max) if tm_cnt > 0 else "",
-                    "매매 평균가": fmt(int(tm_avg)) if tm_cnt > 0 else "",
-                    "매매 매물수 (전체)": tm_cnt if tm_cnt > 0 else "",
-                    "전세 최저가": fmt(rm_min) if rm_cnt > 0 else "",
-                    "전세 최고가": fmt(rm_max) if rm_cnt > 0 else "",
-                    "전세 평균가": fmt(int(rm_avg)) if rm_cnt > 0 else "",
-                    "전세 매물수": rm_cnt if rm_cnt > 0 else "",
-                    "갭": fmt(gap) if gap != "" else "",
-                    "전세가율": f"{jeonse_ratio:.1f}%" if jeonse_ratio != "" else "",
-                    "링크": f'=HYPERLINK("https://fin.land.naver.com/complexes/{cid}", "바로가기")',
-                    "총동수": complex_info.get("dongCount", 0),
-                    "건설사": const_co,
-                    "난방방식": heat_method,
-                    "난방연료": heat_fuel,
-                    "세대당주차대수": pkg_cnt_hh,
-                    "용적률": far,
-                    "건폐율": bcr,
-                    "위도": lat,
-                    "경도": long,
-                    "수집일": datetime.now(timezone(timedelta(hours=9))).strftime("%Y-%m-%d"),
-                    "complex_id": cid
-                })
+                results.append(
+                    {
+                        "시/도": sido,
+                        "시/군/구": gungu,
+                        "읍/면/동": dong,
+                        "아파트명": cname,
+                        "준공일": approval_date,
+                        "총세대수": complex_info.get("totalHouseholdNumber", 0),
+                        "타입": space.get("supplySpaceName", "Unknown"),
+                        "공급면적": float(space.get("supplySpace", 0)),
+                        "전용면적": float(space.get("exclusiveSpace", 0)),
+                        "현관구조": hallway_type,
+                        "방/욕실": room_bath_str,
+                        "매매 최저가 (일반)": fmt(tm_std) if tm_cnt > 0 else "",
+                        "매매 최저가 (저층)": fmt(tm_spc) if tm_cnt > 0 else "",
+                        "매매 최고가": fmt(tm_max) if tm_cnt > 0 else "",
+                        "매매 평균가": fmt(int(tm_avg)) if tm_cnt > 0 else "",
+                        "매매 매물수 (전체)": tm_cnt if tm_cnt > 0 else "",
+                        "전세 최저가": fmt(rm_min) if rm_cnt > 0 else "",
+                        "전세 최고가": fmt(rm_max) if rm_cnt > 0 else "",
+                        "전세 평균가": fmt(int(rm_avg)) if rm_cnt > 0 else "",
+                        "전세 매물수": rm_cnt if rm_cnt > 0 else "",
+                        "갭": fmt(gap) if gap != "" else "",
+                        "전세가율": f"{jeonse_ratio:.1f}%"
+                        if jeonse_ratio != ""
+                        else "",
+                        "링크": f'=HYPERLINK("https://fin.land.naver.com/complexes/{cid}", "바로가기")',
+                        "총동수": complex_info.get("dongCount", 0),
+                        "건설사": const_co,
+                        "난방방식": heat_method,
+                        "난방연료": heat_fuel,
+                        "세대당주차대수": pkg_cnt_hh,
+                        "용적률": far,
+                        "건폐율": bcr,
+                        "위도": lat,
+                        "경도": long,
+                        "수집일": datetime.now(timezone(timedelta(hours=9))).strftime(
+                            "%Y-%m-%d"
+                        ),
+                        "complex_id": cid,
+                    }
+                )
 
         return pd.DataFrame(results)
 
@@ -856,7 +927,9 @@ def init_db():
     )
     """)
 
-    cur.execute("CREATE INDEX IF NOT EXISTS idx_prices_complex_date ON prices (complex_no, date)")
+    cur.execute(
+        "CREATE INDEX IF NOT EXISTS idx_prices_complex_date ON prices (complex_no, date)"
+    )
 
     conn.commit()
     conn.close()
@@ -874,6 +947,7 @@ def save_to_db(df, table_name="real_estate"):
     count_prices = 0
 
     try:
+
         def parse_price(val):
             if not val:
                 return 0
@@ -887,36 +961,40 @@ def save_to_db(df, table_name="real_estate"):
         for cid, group in complex_groups:
             first = group.iloc[0]
 
-            cur.execute("""
+            cur.execute(
+                """
             INSERT OR REPLACE INTO complexes (
                 complex_no, name, region_depth1, region_depth2, region_depth3,
                 total_households, total_dongs, completion_date, construction_company,
                 heating_method, heating_fuel, parking_per_household,
                 far, bcr, latitude, longitude, last_updated
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """, (
-                int(cid),
-                first["아파트명"],
-                first["시/도"],
-                first["시/군/구"],
-                first["읍/면/동"],
-                int(first.get("총세대수", 0) or 0),
-                int(first.get("총동수", 0) or 0),
-                first.get("준공일", ""),
-                first.get("건설사", ""),
-                first.get("난방방식", ""),
-                first.get("난방연료", ""),
-                float(str(first.get("세대당주차대수", 0)).replace("대", "") or 0),
-                float(str(first.get("용적률", "0")).replace("%", "") or 0),
-                float(str(first.get("건폐율", "0")).replace("%", "") or 0),
-                float(first.get("위도", 0) or 0),
-                float(first.get("경도", 0) or 0),
-                datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            ))
+            """,
+                (
+                    int(cid),
+                    first["아파트명"],
+                    first["시/도"],
+                    first["시/군/구"],
+                    first["읍/면/동"],
+                    int(first.get("총세대수", 0) or 0),
+                    int(first.get("총동수", 0) or 0),
+                    first.get("준공일", ""),
+                    first.get("건설사", ""),
+                    first.get("난방방식", ""),
+                    first.get("난방연료", ""),
+                    float(str(first.get("세대당주차대수", 0)).replace("대", "") or 0),
+                    float(str(first.get("용적률", "0")).replace("%", "") or 0),
+                    float(str(first.get("건폐율", "0")).replace("%", "") or 0),
+                    float(first.get("위도", 0) or 0),
+                    float(first.get("경도", 0) or 0),
+                    datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                ),
+            )
             count_complex += 1
 
             for _, row in group.iterrows():
-                cur.execute("""
+                cur.execute(
+                    """
                 INSERT INTO prices (
                     complex_no, date, pyeong_type, supply_area, exclusive_area,
                     hallway_type, room_bath,
@@ -924,34 +1002,39 @@ def save_to_db(df, table_name="real_estate"):
                     rent_min, rent_max, rent_avg, rent_count,
                     gap, jeonse_ratio
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """, (
-                    int(cid),
-                    row["수집일"],
-                    row["타입"],
-                    float(row["공급면적"] or 0),
-                    float(row["전용면적"] or 0),
-                    row.get("현관구조", ""),
-                    row.get("방/욕실", ""),
-                    parse_price(row["매매 최저가 (일반)"]),
-                    parse_price(row["매매 최저가 (저층)"]),
-                    parse_price(row["매매 최고가"]),
-                    parse_price(row["매매 평균가"]),
-                    int(row["매매 매물수 (전체)"] or 0),
-                    parse_price(row["전세 최저가"]),
-                    parse_price(row["전세 최고가"]),
-                    parse_price(row["전세 평균가"]),
-                    int(row["전세 매물수"] or 0),
-                    parse_price(row.get("갭", 0)),
-                    float(str(row.get("전세가율", "0")).replace("%", "") or 0)
-                ))
+                """,
+                    (
+                        int(cid),
+                        row["수집일"],
+                        row["타입"],
+                        float(row["공급면적"] or 0),
+                        float(row["전용면적"] or 0),
+                        row.get("현관구조", ""),
+                        row.get("방/욕실", ""),
+                        parse_price(row["매매 최저가 (일반)"]),
+                        parse_price(row["매매 최저가 (저층)"]),
+                        parse_price(row["매매 최고가"]),
+                        parse_price(row["매매 평균가"]),
+                        int(row["매매 매물수 (전체)"] or 0),
+                        parse_price(row["전세 최저가"]),
+                        parse_price(row["전세 최고가"]),
+                        parse_price(row["전세 평균가"]),
+                        int(row["전세 매물수"] or 0),
+                        parse_price(row.get("갭", 0)),
+                        float(str(row.get("전세가율", "0")).replace("%", "") or 0),
+                    ),
+                )
                 count_prices += 1
 
         conn.commit()
-        print(f"💾 Database Updated: {count_complex} complexes updated, {count_prices} price records added.")
+        print(
+            f"💾 Database Updated: {count_complex} complexes updated, {count_prices} price records added."
+        )
 
     except Exception as e:
         print(f"❌ Database Error: {e}")
         import traceback
+
         traceback.print_exc()
     finally:
         conn.close()
@@ -973,7 +1056,9 @@ def save_complexes_metadata_only(complexes_dict):
             if not isinstance(info, dict):
                 continue
 
-            name = info.get("name", "") or info.get("complexName", "") or f"Complex_{cid}"
+            name = (
+                info.get("name", "") or info.get("complexName", "") or f"Complex_{cid}"
+            )
 
             addr = info.get("address", {})
             sido = ""
@@ -998,7 +1083,12 @@ def save_complexes_metadata_only(complexes_dict):
 
             # ✅ Fallback: parse from full path stored in _dong_name
             # Example: "서울시 강남구 신사동"
-            if (not sido or not gungu) and dong_path and isinstance(dong_path, str) and " " in dong_path:
+            if (
+                (not sido or not gungu)
+                and dong_path
+                and isinstance(dong_path, str)
+                and " " in dong_path
+            ):
                 tokens = dong_path.split()
                 if len(tokens) >= 3:
                     sido = sido or tokens[0]
@@ -1024,45 +1114,53 @@ def save_complexes_metadata_only(complexes_dict):
             far = b_ratio.get("floorAreaRatio") or 0
             bcr = b_ratio.get("buildingCoverageRatio") or 0
 
-            total_households = info.get("totalHouseholdNumber", 0) or info.get("households", 0)
+            total_households = info.get("totalHouseholdNumber", 0) or info.get(
+                "households", 0
+            )
             total_dongs = info.get("dongCount", 0) or 0
             completion_date = info.get("useApprovalDate", "") or ""
 
             construction_company = info.get("constructionCompany", "") or ""
 
-            cur.execute("""
+            cur.execute(
+                """
             INSERT OR REPLACE INTO complexes (
                 complex_no, name, region_depth1, region_depth2, region_depth3,
                 total_households, total_dongs, completion_date, construction_company,
                 heating_method, heating_fuel, parking_per_household,
                 far, bcr, latitude, longitude, last_updated
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """, (
-                int(cid),
-                name,
-                sido,
-                gungu,
-                dong,
-                int(total_households or 0),
-                int(total_dongs or 0),
-                completion_date,
-                construction_company,
-                heating_method,
-                heating_fuel,
-                float(parking_per_hh or 0),
-                float(far or 0),
-                float(bcr or 0),
-                float(lat or 0),
-                float(lon or 0),
-                datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            ))
+            """,
+                (
+                    int(cid),
+                    name,
+                    sido,
+                    gungu,
+                    dong,
+                    int(total_households or 0),
+                    int(total_dongs or 0),
+                    completion_date,
+                    construction_company,
+                    heating_method,
+                    heating_fuel,
+                    float(parking_per_hh or 0),
+                    float(far or 0),
+                    float(bcr or 0),
+                    float(lat or 0),
+                    float(lon or 0),
+                    datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                ),
+            )
 
         conn.commit()
-        print(f"💾 complexes metadata only saved/updated: {len(complexes_dict)} candidates processed.")
+        print(
+            f"💾 complexes metadata only saved/updated: {len(complexes_dict)} candidates processed."
+        )
 
     except Exception as e:
         print(f"❌ complexes metadata save error: {e}")
         import traceback
+
         traceback.print_exc()
     finally:
         conn.close()
@@ -1084,10 +1182,7 @@ def get_sharded_targets(shard_index, shard_total):
         is_valid = node.get("has_complexes", False)
 
         if "url" in node and is_valid:
-            all_targets.append({
-                "name": path_name,
-                "url": node["url"]
-            })
+            all_targets.append({"name": path_name, "url": node["url"]})
 
         if "children" in node:
             for k, v in node["children"].items():
@@ -1103,16 +1198,24 @@ def get_sharded_targets(shard_index, shard_total):
         return []
 
     sharded = all_targets[shard_index::shard_total]
-    print(f"[Shard] {shard_index}/{shard_total} (Stripe): Processing {len(sharded)} regions")
+    print(
+        f"[Shard] {shard_index}/{shard_total} (Stripe): Processing {len(sharded)} regions"
+    )
 
     return sharded
 
 
 async def main():
     parser = argparse.ArgumentParser(description="Naver Land Crawler")
-    parser.add_argument("--regions", nargs="+", help="List of regions to crawl (overrides config)")
-    parser.add_argument("--db-path", default="real_estate.db", help="Path to output SQLite DB")
-    parser.add_argument("--shard-index", type=int, default=None, help="Shard Index (0-based)")
+    parser.add_argument(
+        "--regions", nargs="+", help="List of regions to crawl (overrides config)"
+    )
+    parser.add_argument(
+        "--db-path", default="real_estate.db", help="Path to output SQLite DB"
+    )
+    parser.add_argument(
+        "--shard-index", type=int, default=None, help="Shard Index (0-based)"
+    )
     parser.add_argument("--shard-total", type=int, default=None, help="Total Shards")
     args = parser.parse_args()
 
@@ -1128,7 +1231,9 @@ async def main():
 
     # Case A: Sharding Mode
     if args.shard_index is not None and args.shard_total is not None:
-        print(f"[Shard] Sharding Enabled: Index {args.shard_index} / Total {args.shard_total}")
+        print(
+            f"[Shard] Sharding Enabled: Index {args.shard_index} / Total {args.shard_total}"
+        )
         direct_targets = get_sharded_targets(args.shard_index, args.shard_total)
 
     # Case B: Manual Region List

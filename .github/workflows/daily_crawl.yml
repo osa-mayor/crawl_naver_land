@@ -7,7 +7,7 @@ on:
 
 concurrency:
   group: daily-crawl
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 jobs:
   crawl:
@@ -56,7 +56,7 @@ jobs:
       - name: Run Crawler
         env:
           MAX_CONCURRENT_PAGES: 1
-          MAX_API_PREFETCH_CONCURRENCY: 6
+          MAX_API_PREFETCH_CONCURRENCY: 4
         run: |
           IFS='-' read -r SHARD_START SHARD_END <<< "${{ matrix.shard_group }}"
           failed=()
@@ -75,7 +75,8 @@ jobs:
           fi
 
       - name: Upload Partial DB
-        if: always()
+        if: ${{ always() && !cancelled() }}
+        continue-on-error: true
         uses: actions/upload-artifact@v4
         with:
           name: partial-db-group-${{ matrix.shard_group }}
@@ -84,7 +85,8 @@ jobs:
           retention-days: 1
 
       - name: Upload Logs
-        if: always()
+        if: ${{ always() && !cancelled() }}
+        continue-on-error: true
         uses: actions/upload-artifact@v4
         with:
           name: logs-group-${{ matrix.shard_group }}
