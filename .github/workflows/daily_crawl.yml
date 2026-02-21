@@ -11,7 +11,7 @@ concurrency:
 
 jobs:
   crawl:
-    name: Crawl Shard ${{ matrix.shard }}
+    name: Crawl Shards ${{ matrix.shard_group }}
     runs-on: [self-hosted, macOS]
     defaults:
       run:
@@ -21,14 +21,27 @@ jobs:
       PYTHONUNBUFFERED: 1
     strategy:
       fail-fast: false
-      max-parallel: 3
+      max-parallel: 2
       matrix:
-        # 20 Shards (Indices 0 to 19)
-        shard: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19]
+        shard_group: ["0-3", "4-7", "8-11", "12-15", "16-19"]
 
     steps:
       - name: Checkout Public Code
         uses: actions/checkout@v4
+
+      - name: Cache Python packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('**/requirements.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-
+
+      - name: Cache Playwright browsers
+        uses: actions/cache@v4
+        with:
+          path: ~/Library/Caches/ms-playwright
+          key: ${{ runner.os }}-playwright-${{ hashFiles('**/requirements.txt') }}
 
       - name: Install Dependencies
         run: |
@@ -44,22 +57,40 @@ jobs:
           MAX_CONCURRENT_PAGES: 1
           MAX_API_PREFETCH_CONCURRENCY: 6
         run: |
-          echo "🚀 Processing Shard: ${{ matrix.shard }}/20"
-          python crawler.py --shard-index ${{ matrix.shard }} --shard-total 20 --db-path db_shard_${{ matrix.shard }}.db
+          IFS='-' read -r SHARD_START SHARD_END <<< "${{ matrix.shard_group }}"
+          failed=()
+
+          for shard in $(seq "$SHARD_START" "$SHARD_END"); do
+            echo "🚀 Processing Shard: ${shard}/20 (group ${{ matrix.shard_group }})"
+            if ! python crawler.py --shard-index "$shard" --shard-total 20 --db-path "db_shard_${shard}.db"; then
+              failed+=("$shard")
+            fi
+          done
+
+          if [ "${#failed[@]}" -gt 0 ]; then
+            printf '%s\n' "${failed[@]}" > failed_shards.txt
+            echo "Failed shards: ${failed[*]}"
+            exit 1
+          fi
 
       - name: Upload Partial DB
+        if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: partial-db-shard-${{ matrix.shard }}
-          path: db_shard_${{ matrix.shard }}.db
-          retention-days: 1 # Short retention as it's merged later
+          name: partial-db-group-${{ matrix.shard_group }}
+          path: db_shard_*.db
+          if-no-files-found: warn
+          retention-days: 1
 
       - name: Upload Logs
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: logs-shard-${{ matrix.shard }}
-          path: crawling_db.log
+          name: logs-group-${{ matrix.shard_group }}
+          path: |
+            crawling_db.log
+            failed_shards.txt
+          if-no-files-found: warn
           retention-days: 7
 
 
