@@ -13,7 +13,7 @@ jobs:
   crawl:
     name: Crawl Shards ${{ matrix.shard_group }}
     runs-on: [self-hosted, macOS, crawl-naver-land]
-    timeout-minutes: 240
+    timeout-minutes: 360
     defaults:
       run:
         shell: bash
@@ -24,7 +24,7 @@ jobs:
       fail-fast: false
       max-parallel: 2
       matrix:
-        shard_group: ["0-3", "4-7", "8-11", "12-15", "16-19"]
+        shard_group: ["0-1", "2-3", "4-5", "6-7", "8-9", "10-11", "12-13", "14-15", "16-17", "18-19"]
 
     steps:
       - name: Checkout Public Code
@@ -55,7 +55,7 @@ jobs:
 
       - name: Run Crawler
         env:
-          MAX_CONCURRENT_PAGES: 1
+          MAX_CONCURRENT_PAGES: 2
           MAX_API_PREFETCH_CONCURRENCY: 4
         run: |
           IFS='-' read -r SHARD_START SHARD_END <<< "${{ matrix.shard_group }}"
