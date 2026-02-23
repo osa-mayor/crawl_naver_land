@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
 
 concurrency:
-  group: daily-crawl
+  group: daily-crawl-v2
   cancel-in-progress: false
 
 jobs:
