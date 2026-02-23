@@ -5,9 +5,7 @@ on:
     - cron: '0 16 * * 0,3'
   workflow_dispatch:
 
-concurrency:
-  group: daily-crawl-v2
-  cancel-in-progress: false
+
 
 jobs:
   crawl:
