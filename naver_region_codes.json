@@ -3165,7 +3165,7 @@
           },
           "이의동": {
             "url": "https://fin.land.naver.com/regions?si=4100000000&gun=4111700000&eup=4111710300",
-            "has_complexes": true
+            "has_complexes": false
           },
           "하동": {
             "url": "https://fin.land.naver.com/regions?si=4100000000&gun=4111700000&eup=4111710400",
@@ -3335,7 +3335,7 @@
           },
           "광석동": {
             "url": "https://fin.land.naver.com/regions?si=4100000000&gun=4139000000&eup=4139012100",
-            "has_complexes": true
+            "has_complexes": false
           },
           "군자동": {
             "url": "https://fin.land.naver.com/regions?si=4100000000&gun=4139000000&eup=4139012800",
@@ -5125,47 +5125,47 @@
           },
           "기산동": {
             "url": "https://fin.land.naver.com/regions?si=4100000000&gun=4159000000&eup=4159011900",
-            "has_complexes": true
+            "has_complexes": false
           },
           "기안동": {
             "url": "https://fin.land.naver.com/regions?si=4100000000&gun=4159000000&eup=4159012400",
-            "has_complexes": true
+            "has_complexes": false
           },
           "남양읍": {
             "url": "https://fin.land.naver.com/regions?si=4100000000&gun=4159000000&eup=4159026200",
-            "has_complexes": true
+            "has_complexes": false
           },
           "능동": {
             "url": "https://fin.land.naver.com/regions?si=4100000000&gun=4159000000&eup=4159011800",
-            "has_complexes": true
+            "has_complexes": false
           },
           "마도면": {
             "url": "https://fin.land.naver.com/regions?si=4100000000&gun=4159000000&eup=4159033000",
-            "has_complexes": true
+            "has_complexes": false
           },
           "매송면": {
             "url": "https://fin.land.naver.com/regions?si=4100000000&gun=4159000000&eup=4159031000",
-            "has_complexes": true
+            "has_complexes": false
           },
           "목동": {
             "url": "https://fin.land.naver.com/regions?si=4100000000&gun=4159000000&eup=4159013400",
-            "has_complexes": true
+            "has_complexes": false
           },
           "반송동": {
             "url": "https://fin.land.naver.com/regions?si=4100000000&gun=4159000000&eup=4159012700",
-            "has_complexes": true
+            "has_complexes": false
           },
           "반월동": {
             "url": "https://fin.land.naver.com/regions?si=4100000000&gun=4159000000&eup=4159012000",
-            "has_complexes": true
+            "has_complexes": false
           },
           "반정동": {
             "url": "https://fin.land.naver.com/regions?si=4100000000&gun=4159000000&eup=4159012100",
-            "has_complexes": true
+            "has_complexes": false
           },
           "방교동": {
             "url": "https://fin.land.naver.com/regions?si=4100000000&gun=4159000000&eup=4159013800",
-            "has_complexes": true
+            "has_complexes": false
           },
           "배양동": {
             "url": "https://fin.land.naver.com/regions?si=4100000000&gun=4159000000&eup=4159012300",
@@ -5173,79 +5173,79 @@
           },
           "병점동": {
             "url": "https://fin.land.naver.com/regions?si=4100000000&gun=4159000000&eup=4159011700",
-            "has_complexes": true
+            "has_complexes": false
           },
           "봉담읍": {
             "url": "https://fin.land.naver.com/regions?si=4100000000&gun=4159000000&eup=4159025300",
-            "has_complexes": true
+            "has_complexes": false
           },
           "비봉면": {
             "url": "https://fin.land.naver.com/regions?si=4100000000&gun=4159000000&eup=4159032000",
-            "has_complexes": true
+            "has_complexes": false
           },
           "산척동": {
             "url": "https://fin.land.naver.com/regions?si=4100000000&gun=4159000000&eup=4159013500",
-            "has_complexes": true
+            "has_complexes": false
           },
           "새솔동": {
             "url": "https://fin.land.naver.com/regions?si=4100000000&gun=4159000000&eup=4159014000",
-            "has_complexes": true
+            "has_complexes": false
           },
           "서신면": {
             "url": "https://fin.land.naver.com/regions?si=4100000000&gun=4159000000&eup=4159035000",
-            "has_complexes": true
+            "has_complexes": false
           },
           "석우동": {
             "url": "https://fin.land.naver.com/regions?si=4100000000&gun=4159000000&eup=4159012800",
-            "has_complexes": true
+            "has_complexes": false
           },
           "송동": {
             "url": "https://fin.land.naver.com/regions?si=4100000000&gun=4159000000&eup=4159013700",
-            "has_complexes": true
+            "has_complexes": false
           },
           "송산동": {
             "url": "https://fin.land.naver.com/regions?si=4100000000&gun=4159000000&eup=4159012500",
-            "has_complexes": true
+            "has_complexes": false
           },
           "송산면": {
             "url": "https://fin.land.naver.com/regions?si=4100000000&gun=4159000000&eup=4159034000",
-            "has_complexes": true
+            "has_complexes": false
           },
           "신동": {
             "url": "https://fin.land.naver.com/regions?si=4100000000&gun=4159000000&eup=4159013300",
-            "has_complexes": true
+            "has_complexes": false
           },
           "안녕동": {
             "url": "https://fin.land.naver.com/regions?si=4100000000&gun=4159000000&eup=4159012600",
-            "has_complexes": true
+            "has_complexes": false
           },
           "양감면": {
             "url": "https://fin.land.naver.com/regions?si=4100000000&gun=4159000000&eup=4159040000",
-            "has_complexes": true
+            "has_complexes": false
           },
           "영천동": {
             "url": "https://fin.land.naver.com/regions?si=4100000000&gun=4159000000&eup=4159013100",
-            "has_complexes": true
+            "has_complexes": false
           },
           "오산동": {
             "url": "https://fin.land.naver.com/regions?si=4100000000&gun=4159000000&eup=4159012900",
-            "has_complexes": true
+            "has_complexes": false
           },
           "우정읍": {
             "url": "https://fin.land.naver.com/regions?si=4100000000&gun=4159000000&eup=4159025600",
-            "has_complexes": true
+            "has_complexes": false
           },
           "장안면": {
             "url": "https://fin.land.naver.com/regions?si=4100000000&gun=4159000000&eup=4159037000",
-            "has_complexes": true
+            "has_complexes": false
           },
           "장지동": {
             "url": "https://fin.land.naver.com/regions?si=4100000000&gun=4159000000&eup=4159013600",
-            "has_complexes": true
+            "has_complexes": false
           },
           "정남면": {
             "url": "https://fin.land.naver.com/regions?si=4100000000&gun=4159000000&eup=4159041000",
-            "has_complexes": true
+            "has_complexes": false
           },
           "중동": {
             "url": "https://fin.land.naver.com/regions?si=4100000000&gun=4159000000&eup=4159013200",
@@ -5253,26 +5253,26 @@
           },
           "진안동": {
             "url": "https://fin.land.naver.com/regions?si=4100000000&gun=4159000000&eup=4159011600",
-            "has_complexes": true
+            "has_complexes": false
           },
           "청계동": {
             "url": "https://fin.land.naver.com/regions?si=4100000000&gun=4159000000&eup=4159013000",
-            "has_complexes": true
+            "has_complexes": false
           },
           "팔탄면": {
             "url": "https://fin.land.naver.com/regions?si=4100000000&gun=4159000000&eup=4159036000",
-            "has_complexes": true
+            "has_complexes": false
           },
           "향남읍": {
             "url": "https://fin.land.naver.com/regions?si=4100000000&gun=4159000000&eup=4159025900",
-            "has_complexes": true
+            "has_complexes": false
           },
           "황계동": {
             "url": "https://fin.land.naver.com/regions?si=4100000000&gun=4159000000&eup=4159012200",
             "has_complexes": false
           }
         },
-        "has_complexes": true
+        "has_complexes": false
       }
     },
     "has_complexes": true
@@ -8993,7 +8993,7 @@
           },
           "합강동": {
             "url": "https://fin.land.naver.com/regions?si=3600000000&gun=3611000000&eup=3611011700",
-            "has_complexes": false
+            "has_complexes": true
           },
           "해밀동": {
             "url": "https://fin.land.naver.com/regions?si=3600000000&gun=3611000000&eup=3611011600",
@@ -20339,7 +20339,7 @@
           },
           "대의동3가": {
             "url": "https://fin.land.naver.com/regions?si=4600000000&gun=4611000000&eup=4611013500",
-            "has_complexes": false
+            "has_complexes": true
           },
           "동명동": {
             "url": "https://fin.land.naver.com/regions?si=4600000000&gun=4611000000&eup=4611011800",
