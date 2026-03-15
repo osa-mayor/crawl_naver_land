@@ -1,0 +1,44 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.osa-mayor.monthly-region-validator</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/bash</string>
+    <string>/Users/pyo/Projects/crawl_naver_land/scripts/run_monthly_validator.sh</string>
+  </array>
+
+  <key>WorkingDirectory</key>
+  <string>/Users/pyo/Projects/crawl_naver_land</string>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PYTHONUTF8</key>
+    <string>1</string>
+    <key>PYTHONUNBUFFERED</key>
+    <string>1</string>
+  </dict>
+
+  <key>StandardOutPath</key>
+  <string>/Users/pyo/Projects/crawl_naver_land/runtime/logs/monthly_validator.launchd.stdout.log</string>
+
+  <key>StandardErrorPath</key>
+  <string>/Users/pyo/Projects/crawl_naver_land/runtime/logs/monthly_validator.launchd.stderr.log</string>
+
+  <key>StartCalendarInterval</key>
+  <dict>
+    <key>Day</key>
+    <integer>1</integer>
+    <key>Hour</key>
+    <integer>9</integer>
+    <key>Minute</key>
+    <integer>0</integer>
+  </dict>
+
+  <key>RunAtLoad</key>
+  <false/>
+</dict>
+</plist>

@@ -1,9 +1,6 @@
 name: Monthly Region Validator
 
 on:
-  schedule:
-    # Run at 00:00 on the 1st of every month
-    - cron: '0 0 1 * *'
   workflow_dispatch:
 
 permissions:
