@@ -1,0 +1,72 @@
+{
+  "project_root": "/Users/pyo/Projects/crawl_naver_land",
+  "runtime_root": "runtime",
+  "region_json_path": "naver_region_codes.json",
+  "preflight_smoke_test": false,
+  "retention_days": 14,
+  "crawl": {
+    "shard_total": 20,
+    "shard_groups": [
+      "0-1",
+      "2-3",
+      "4-5",
+      "6-7",
+      "8-9",
+      "10-11",
+      "12-13",
+      "14-15",
+      "16-17",
+      "18-19"
+    ],
+    "max_local_parallel": 2,
+    "max_concurrent_pages": 2,
+    "max_api_prefetch_concurrency": 4,
+    "retry_failed_shards": 1
+  },
+  "exports": [
+    {
+      "name": "Seoul",
+      "regions": ["서울시"],
+      "min_households": 100
+    },
+    {
+      "name": "Gyeonggi",
+      "regions": ["경기도"],
+      "min_households": 100
+    },
+    {
+      "name": "Metros",
+      "regions": ["인천시", "부산시", "대구시", "광주시", "대전시", "울산시", "세종시"],
+      "min_households": 100
+    },
+    {
+      "name": "Provinces",
+      "regions": ["강원도", "충청북도", "충청남도", "경상북도", "경상남도", "전북도", "전라남도", "제주도"],
+      "min_households": 100
+    }
+  ],
+  "google_drive": {
+    "enabled": true,
+    "folder_id": "13RHa2d8bv_9GVU7v6mHdSKZrL8svfKjr",
+    "token_file": ".local_secrets/gdrive_token.json"
+  },
+  "discord": {
+    "enabled": true,
+    "webhook_url": "",
+    "webhook_file": ".local_secrets/discord_webhook_url.txt"
+  },
+  "validator": {
+    "enabled": true,
+    "runtime_root": "runtime/monthly_validator",
+    "repo_root": ".",
+    "region_file": "naver_region_codes.json",
+    "max_concurrent_tabs": 5,
+    "timeout_ms": 10000,
+    "expected_branch": "main",
+    "remote_name": "origin",
+    "commit_name": "Local Validator",
+    "commit_email": "local-validator@localhost",
+    "commit_message_template": "Update region validity: {date}",
+    "push_changes": true
+  }
+}
