@@ -10,6 +10,7 @@ import os
 import sqlite3
 import argparse
 import sys
+from pathlib import Path
 from land_selectors import NaverLandSelectors
 
 # ==========================================
@@ -31,18 +32,50 @@ MAX_CONCURRENT_PAGES = int(
 )  # Configurable via Env Var
 MAX_API_PREFETCH_CONCURRENCY = int(os.getenv("MAX_API_PREFETCH_CONCURRENCY", 6))
 HEADLESS_MODE = True  # Set to False to watch process
-DB_PATH = "real_estate.db"  # SQLite Database File
+BASE_DIR = Path(__file__).resolve().parent
+DB_PATH = str(BASE_DIR / "real_estate.db")  # SQLite Database File
+REGION_JSON_PATH = str(
+    Path(os.getenv("NAVER_REGION_JSON_PATH", BASE_DIR / "naver_region_codes.json"))
+)
+CRAWLER_LOG_PATH = str(
+    Path(os.getenv("CRAWLER_LOG_PATH", BASE_DIR / "crawling_db.log"))
+)
+SCREENSHOT_DIR = str(Path(os.getenv("CRAWLER_SCREENSHOT_DIR", BASE_DIR)))
 
 # ==========================================
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s - %(levelname)s - %(message)s",
-    handlers=[
-        logging.StreamHandler(),
-        logging.FileHandler("crawling_db.log", encoding="utf-8"),
-    ],
-)
+
+def ensure_directory(path):
+    Path(path).mkdir(parents=True, exist_ok=True)
+
+
+def ensure_parent_directory(path):
+    Path(path).parent.mkdir(parents=True, exist_ok=True)
+
+
+def sanitize_filename(value):
+    sanitized = re.sub(r"[^A-Za-z0-9._-]+", "_", value).strip("._")
+    return sanitized or "unnamed"
+
+
+def configure_logging(log_path):
+    ensure_parent_directory(log_path)
+
+    root_logger = logging.getLogger()
+    root_logger.handlers.clear()
+    root_logger.setLevel(logging.INFO)
+
+    formatter = logging.Formatter("%(asctime)s - %(levelname)s - %(message)s")
+
+    stream_handler = logging.StreamHandler()
+    stream_handler.setFormatter(formatter)
+
+    file_handler = logging.FileHandler(log_path, encoding="utf-8")
+    file_handler.setFormatter(formatter)
+
+    root_logger.addHandler(stream_handler)
+    root_logger.addHandler(file_handler)
+
 
 # User-Agent List for Stealth
 USER_AGENTS = [
@@ -76,10 +109,12 @@ class DataProcessor:
 
 
 class NaverLandPlaywright:
-    def __init__(self):
+    def __init__(self, screenshot_dir=None):
         self.complexes = {}
         self.captured_articles = {}
         self.region_name = ""
+        self.screenshot_dir = Path(screenshot_dir or SCREENSHOT_DIR)
+        ensure_directory(self.screenshot_dir)
 
     def get_context_options(self):
         ua = random.choice(USER_AGENTS)
@@ -268,10 +303,11 @@ class NaverLandPlaywright:
 
         logging.info(f"Target Count in Region: {len(filtered_cids)}")
         if not filtered_cids:
-            await page.screenshot(path=f"debug_crawler_fail_{dong_name}.png")
-            logging.error(
-                f"Saved debug screenshot to debug_crawler_fail_{dong_name}.png"
+            screenshot_path = self.screenshot_dir / (
+                f"debug_crawler_fail_{sanitize_filename(dong_name)}.png"
             )
+            await page.screenshot(path=str(screenshot_path))
+            logging.error(f"Saved debug screenshot to {screenshot_path}")
             return
 
         # ========================================================
@@ -754,7 +790,7 @@ def get_all_leaf_items(node, current_name=""):
 
 
 def get_region_urls(region_list):
-    json_path = "naver_region_codes.json"
+    json_path = REGION_JSON_PATH
     if not os.path.exists(json_path):
         print(f"❌ {json_path} not found.")
         return []
@@ -864,7 +900,7 @@ def get_region_urls(region_list):
 
 def get_subregions(region_name):
     """Get list of immediate child regions (e.g., '서울시' -> ['강남구', ...])"""
-    json_path = "naver_region_codes.json"
+    json_path = REGION_JSON_PATH
     try:
         with open(json_path, "r", encoding="utf-8") as f:
             data = json.load(f)
@@ -877,6 +913,7 @@ def get_subregions(region_name):
 
 def init_db():
     """Initialize Database with Normalized Schema"""
+    ensure_parent_directory(DB_PATH)
     conn = sqlite3.connect(DB_PATH)
     cur = conn.cursor()
 
@@ -1168,7 +1205,7 @@ def save_complexes_metadata_only(complexes_dict):
 
 # 분산 처리(Sharding)를 위한 헬퍼 함수
 def get_sharded_targets(shard_index, shard_total):
-    json_path = "naver_region_codes.json"
+    json_path = REGION_JSON_PATH
     if not os.path.exists(json_path):
         print(f"❌ {json_path} not found.")
         return []
@@ -1217,12 +1254,27 @@ async def main():
         "--shard-index", type=int, default=None, help="Shard Index (0-based)"
     )
     parser.add_argument("--shard-total", type=int, default=None, help="Total Shards")
+    parser.add_argument("--log-path", help="Path to crawler log file")
+    parser.add_argument("--screenshot-dir", help="Directory for debug screenshots")
+    parser.add_argument("--region-json-path", help="Path to region codes JSON file")
     args = parser.parse_args()
 
-    global DB_PATH
+    global DB_PATH, CRAWLER_LOG_PATH, SCREENSHOT_DIR, REGION_JSON_PATH
     if args.db_path:
-        DB_PATH = args.db_path
+        DB_PATH = str(Path(args.db_path).expanduser())
         print(f"[Config] Override: DB Path set to {DB_PATH}")
+
+    if args.log_path:
+        CRAWLER_LOG_PATH = str(Path(args.log_path).expanduser())
+
+    if args.screenshot_dir:
+        SCREENSHOT_DIR = str(Path(args.screenshot_dir).expanduser())
+
+    if args.region_json_path:
+        REGION_JSON_PATH = str(Path(args.region_json_path).expanduser())
+
+    ensure_directory(SCREENSHOT_DIR)
+    configure_logging(CRAWLER_LOG_PATH)
 
     init_db()
 
@@ -1263,7 +1315,7 @@ async def main():
     # Execution
     if direct_targets:
         print(f"🚀 Starting Sharded Crawl with {len(direct_targets)} locations...")
-        crawler = NaverLandPlaywright()
+        crawler = NaverLandPlaywright(screenshot_dir=SCREENSHOT_DIR)
         urls = [(t["name"], t["url"]) for t in direct_targets]
         await crawler.run_test(urls, headless=HEADLESS_MODE)
 
@@ -1287,7 +1339,7 @@ async def main():
                 print(f"⚠️ No URLs found for {region_name}")
                 continue
 
-            crawler = NaverLandPlaywright()
+            crawler = NaverLandPlaywright(screenshot_dir=SCREENSHOT_DIR)
             crawler.region_name = region_name
             print(f"🚀 Crawling {region_name} (URLs: {len(current_urls)})...")
             await crawler.run_test(current_urls, headless=HEADLESS_MODE)
