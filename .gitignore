@@ -1,4 +1,7 @@
 venv/
+.env
+.local_secrets/
+runtime/
 __pycache__/
 *.log
 *.png
