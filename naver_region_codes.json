@@ -2999,7 +2999,7 @@
           },
           "신촌동": {
             "url": "https://fin.land.naver.com/regions?si=4100000000&gun=4113100000&eup=4113110900",
-            "has_complexes": false
+            "has_complexes": true
           },
           "신흥동": {
             "url": "https://fin.land.naver.com/regions?si=4100000000&gun=4113100000&eup=4113110100",
@@ -3165,7 +3165,7 @@
           },
           "이의동": {
             "url": "https://fin.land.naver.com/regions?si=4100000000&gun=4111700000&eup=4111710300",
-            "has_complexes": false
+            "has_complexes": true
           },
           "하동": {
             "url": "https://fin.land.naver.com/regions?si=4100000000&gun=4111700000&eup=4111710400",
@@ -3335,7 +3335,7 @@
           },
           "광석동": {
             "url": "https://fin.land.naver.com/regions?si=4100000000&gun=4139000000&eup=4139012100",
-            "has_complexes": false
+            "has_complexes": true
           },
           "군자동": {
             "url": "https://fin.land.naver.com/regions?si=4100000000&gun=4139000000&eup=4139012800",
@@ -12279,7 +12279,7 @@
           },
           "산성동": {
             "url": "https://fin.land.naver.com/regions?si=4400000000&gun=4415000000&eup=4415010500",
-            "has_complexes": true
+            "has_complexes": false
           },
           "상왕동": {
             "url": "https://fin.land.naver.com/regions?si=4400000000&gun=4415000000&eup=4415011700",
