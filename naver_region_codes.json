@@ -11401,7 +11401,7 @@
           },
           "대소면": {
             "url": "https://fin.land.naver.com/regions?si=4300000000&gun=4377000000&eup=4377034000",
-            "has_complexes": true
+            "has_complexes": false
           },
           "맹동면": {
             "url": "https://fin.land.naver.com/regions?si=4300000000&gun=4377000000&eup=4377033000",
@@ -16335,7 +16335,7 @@
           },
           "축동면": {
             "url": "https://fin.land.naver.com/regions?si=4800000000&gun=4824000000&eup=4824034000",
-            "has_complexes": false
+            "has_complexes": true
           },
           "향촌동": {
             "url": "https://fin.land.naver.com/regions?si=4800000000&gun=4824000000&eup=4824011600",
