@@ -4705,7 +4705,7 @@
           },
           "서패동": {
             "url": "https://fin.land.naver.com/regions?si=4100000000&gun=4148000000&eup=4148011900",
-            "has_complexes": false
+            "has_complexes": true
           },
           "송촌동": {
             "url": "https://fin.land.naver.com/regions?si=4100000000&gun=4148000000&eup=4148011600",
@@ -11775,7 +11775,7 @@
           },
           "미평동": {
             "url": "https://fin.land.naver.com/regions?si=4300000000&gun=4311200000&eup=4311210500",
-            "has_complexes": false
+            "has_complexes": true
           },
           "분평동": {
             "url": "https://fin.land.naver.com/regions?si=4300000000&gun=4311200000&eup=4311210600",
@@ -15887,7 +15887,7 @@
           },
           "하이면": {
             "url": "https://fin.land.naver.com/regions?si=4800000000&gun=4882000000&eup=4882033000",
-            "has_complexes": false
+            "has_complexes": true
           },
           "하일면": {
             "url": "https://fin.land.naver.com/regions?si=4800000000&gun=4882000000&eup=4882032000",
@@ -17681,7 +17681,7 @@
           },
           "당동": {
             "url": "https://fin.land.naver.com/regions?si=4800000000&gun=4822000000&eup=4822011400",
-            "has_complexes": false
+            "has_complexes": true
           },
           "도남동": {
             "url": "https://fin.land.naver.com/regions?si=4800000000&gun=4822000000&eup=4822011700",
