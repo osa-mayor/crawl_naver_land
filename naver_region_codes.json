@@ -4989,7 +4989,7 @@
           },
           "영중면": {
             "url": "https://fin.land.naver.com/regions?si=4100000000&gun=4165000000&eup=4165036000",
-            "has_complexes": false
+            "has_complexes": true
           },
           "이동면": {
             "url": "https://fin.land.naver.com/regions?si=4100000000&gun=4165000000&eup=4165038000",
