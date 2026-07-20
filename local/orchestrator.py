@@ -203,6 +203,15 @@ def parse_group(group: str) -> list[int]:
     return list(range(start, end + 1))
 
 
+def archive_incomplete_shard_db(shard_db: Path, reason: str) -> None:
+    if not shard_db.exists():
+        return
+    archive_path = shard_db.parent / f"failed_{shard_db.stem}_{reason}"
+    if archive_path.exists():
+        archive_path.unlink()
+    shard_db.rename(archive_path)
+
+
 def run_shard(
     config: LocalConfig, paths: dict[str, Path], shard_index: int
 ) -> tuple[bool, dict]:
@@ -232,6 +241,7 @@ def run_shard(
     max_attempts = config.crawl.retry_failed_shards + 1
     while attempts < max_attempts:
         attempts += 1
+        archive_incomplete_shard_db(shard_db, f"before_attempt_{attempts}")
         result = run_command(
             command,
             shard_log,
@@ -247,6 +257,7 @@ def run_shard(
                 "log_path": str(shard_log),
             }
 
+    archive_incomplete_shard_db(shard_db, f"failed_after_{attempts}_attempts")
     return False, {
         "shard": shard_index,
         "attempts": attempts,
