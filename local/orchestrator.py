@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import signal
 import shutil
 import subprocess
 import sys
@@ -88,21 +89,47 @@ def build_runtime_paths(config: LocalConfig, run_id: str) -> dict[str, Path]:
 
 
 def run_command(
-    command: list[str], log_path: Path, cwd: Path, env: dict[str, str] | None = None
+    command: list[str],
+    log_path: Path,
+    cwd: Path,
+    env: dict[str, str] | None = None,
+    timeout_seconds: int | None = None,
 ) -> subprocess.CompletedProcess:
     ensure_dir(log_path.parent)
     with log_path.open("w", encoding="utf-8") as log_file:
         log_file.write("COMMAND: " + " ".join(command) + "\n\n")
+        if timeout_seconds is not None:
+            log_file.write(f"TIMEOUT_SECONDS: {timeout_seconds}\n\n")
         log_file.flush()
-        return subprocess.run(
+
+        process = subprocess.Popen(
             command,
             cwd=str(cwd),
             env=env,
             stdout=log_file,
             stderr=subprocess.STDOUT,
             text=True,
-            check=False,
+            start_new_session=True,
         )
+        try:
+            process.wait(timeout=timeout_seconds)
+        except subprocess.TimeoutExpired:
+            log_file.write(
+                f"\nTIMEOUT: command exceeded {timeout_seconds} seconds; "
+                "terminating process group.\n"
+            )
+            log_file.flush()
+            try:
+                os.killpg(process.pid, signal.SIGTERM)
+                process.wait(timeout=30)
+            except (ProcessLookupError, subprocess.TimeoutExpired):
+                try:
+                    os.killpg(process.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+                process.wait()
+
+        return subprocess.CompletedProcess(command, process.returncode)
 
 
 def build_base_env(config: LocalConfig, paths: dict[str, Path]) -> dict[str, str]:
@@ -205,7 +232,13 @@ def run_shard(
     max_attempts = config.crawl.retry_failed_shards + 1
     while attempts < max_attempts:
         attempts += 1
-        result = run_command(command, shard_log, config.project_root, env)
+        result = run_command(
+            command,
+            shard_log,
+            config.project_root,
+            env,
+            timeout_seconds=config.crawl.shard_timeout_minutes * 60,
+        )
         if result.returncode == 0 and shard_db.exists():
             return True, {
                 "shard": shard_index,

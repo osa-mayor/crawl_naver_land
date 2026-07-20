@@ -68,6 +68,7 @@ class CrawlSettings:
     max_concurrent_pages: int
     max_api_prefetch_concurrency: int
     retry_failed_shards: int
+    shard_timeout_minutes: int
 
 
 @dataclass(frozen=True)
@@ -150,6 +151,7 @@ def load_config(path: str | Path) -> LocalConfig:
             crawl_raw.get("max_api_prefetch_concurrency", 4)
         ),
         retry_failed_shards=int(crawl_raw.get("retry_failed_shards", 1)),
+        shard_timeout_minutes=int(crawl_raw.get("shard_timeout_minutes", 240)),
     )
 
     export_jobs = [
