@@ -6,18 +6,20 @@ import os
 def send_discord_message(webhook_url, message):
     if not webhook_url:
         print("⚠️ No Webhook URL provided.")
-        return
+        return False
 
     payload = {
         "content": message
     }
     
     try:
-        response = requests.post(webhook_url, json=payload)
+        response = requests.post(webhook_url, json=payload, timeout=30)
         response.raise_for_status()
         print("✅ Discord Notification Sent!")
+        return True
     except Exception as e:
         print(f"❌ Failed to send Discord notification: {e}")
+        return False
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
@@ -29,4 +31,4 @@ if __name__ == "__main__":
     # Priority: DB Argument > Environment Variable
     webhook = args.webhook or os.environ.get("DISCORD_WEBHOOK_URL")
     
-    send_discord_message(webhook, args.message)
+    raise SystemExit(0 if send_discord_message(webhook, args.message) else 1)
