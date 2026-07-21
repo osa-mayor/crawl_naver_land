@@ -371,6 +371,8 @@ def write_failed_shards(path: Path, failed_shards: list[int]) -> None:
 
 def run_merge(config: LocalConfig, paths: dict[str, Path]) -> Path:
     pattern = str(paths["shards"] / "db_shard_*.db")
+    if paths["merged_db"].exists():
+        paths["merged_db"].unlink()
     command = [
         config.python_executable,
         str(config.project_root / "merge_db.py"),
