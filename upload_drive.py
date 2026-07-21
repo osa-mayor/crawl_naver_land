@@ -21,6 +21,34 @@ def authenticate_drive_oauth(token_json_content):
         return None
 
 
+def escape_drive_query_value(value):
+    return value.replace("\\", "\\\\").replace("'", "\\'")
+
+
+def find_existing_file(service, folder_id, file_name):
+    """Return the newest non-trashed file with this exact name in the target folder."""
+    escaped_folder = escape_drive_query_value(folder_id)
+    escaped_name = escape_drive_query_value(file_name)
+    query = (
+        f"'{escaped_folder}' in parents and "
+        f"name = '{escaped_name}' and "
+        "trashed = false"
+    )
+    result = (
+        service.files()
+        .list(
+            q=query,
+            spaces="drive",
+            fields="files(id, name, modifiedTime)",
+            orderBy="modifiedTime desc",
+            pageSize=10,
+        )
+        .execute()
+    )
+    files = result.get("files", [])
+    return files[0] if files else None
+
+
 def upload_file(service, file_path, folder_id):
     """Upload or Update a file in the specific folder"""
     file_name = os.path.basename(file_path)
@@ -35,6 +63,24 @@ def upload_file(service, file_path, folder_id):
     media = MediaFileUpload(file_path, resumable=True)
 
     try:
+        existing = find_existing_file(service, folder_id, upload_name)
+        if existing:
+            print(
+                f"♻️ Updating existing Drive file '{upload_name}' "
+                f"(File ID: {existing.get('id')})..."
+            )
+            file = (
+                service.files()
+                .update(
+                    fileId=existing["id"],
+                    media_body=media,
+                    fields="id",
+                )
+                .execute()
+            )
+            print(f"✅ Update Complete. File ID: {file.get('id')}")
+            return True
+
         print(f"📤 Uploading '{file_name}' as '{upload_name}'...")
         file = (
             service.files()

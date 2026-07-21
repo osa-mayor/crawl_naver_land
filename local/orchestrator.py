@@ -487,6 +487,18 @@ def notify_discord(
         return {"success": False, "message": "discord webhook missing"}
 
     message = build_discord_message(summary)
+    previous = summary.get("discord_notification")
+    if (
+        isinstance(previous, dict)
+        and previous.get("success")
+        and previous.get("message") == message
+    ):
+        return {
+            **previous,
+            "skipped_duplicate": True,
+            "reason": "same run/status message already sent",
+        }
+
     command = [
         config.python_executable,
         str(config.project_root / "send_discord.py"),
