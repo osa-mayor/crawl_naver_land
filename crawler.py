@@ -10,6 +10,7 @@ import os
 import sqlite3
 import argparse
 import sys
+import socket
 from pathlib import Path
 from land_selectors import NaverLandSelectors
 
@@ -31,6 +32,12 @@ MAX_CONCURRENT_PAGES = int(
     os.getenv("MAX_CONCURRENT_PAGES", 3)
 )  # Configurable via Env Var
 MAX_API_PREFETCH_CONCURRENCY = int(os.getenv("MAX_API_PREFETCH_CONCURRENCY", 6))
+NAVIGATION_RETRY_ATTEMPTS = int(os.getenv("NAVIGATION_RETRY_ATTEMPTS", 3))
+NETWORK_READY_RETRY_ATTEMPTS = int(os.getenv("NETWORK_READY_RETRY_ATTEMPTS", 12))
+NETWORK_READY_RETRY_DELAY_SECONDS = float(
+    os.getenv("NETWORK_READY_RETRY_DELAY_SECONDS", 5)
+)
+MAX_FAILED_REGION_RATIO = float(os.getenv("MAX_FAILED_REGION_RATIO", 0.25))
 HEADLESS_MODE = True  # Set to False to watch process
 BASE_DIR = Path(__file__).resolve().parent
 DB_PATH = str(BASE_DIR / "real_estate.db")  # SQLite Database File
@@ -77,6 +84,50 @@ def configure_logging(log_path):
     root_logger.addHandler(file_handler)
 
 
+TRANSIENT_NAVIGATION_ERROR_MARKERS = (
+    "ERR_INTERNET_DISCONNECTED",
+    "ERR_NAME_NOT_RESOLVED",
+    "ERR_TIMED_OUT",
+    "ERR_CONNECTION_RESET",
+    "ERR_CONNECTION_CLOSED",
+    "ERR_DNS_NO_MATCHING_SUPPORTED_ALPN",
+    "Timeout",
+    "Target page, context or browser has been closed",
+)
+
+
+def is_transient_navigation_error(error) -> bool:
+    message = str(error)
+    return any(marker in message for marker in TRANSIENT_NAVIGATION_ERROR_MARKERS)
+
+
+def can_connect(host: str, port: int = 443, timeout: float = 5.0) -> bool:
+    try:
+        with socket.create_connection((host, port), timeout=timeout):
+            return True
+    except OSError:
+        return False
+
+
+async def wait_for_network_ready(
+    host: str = "fin.land.naver.com",
+    attempts: int = NETWORK_READY_RETRY_ATTEMPTS,
+    delay_seconds: float = NETWORK_READY_RETRY_DELAY_SECONDS,
+) -> bool:
+    for attempt in range(1, attempts + 1):
+        if can_connect(host):
+            return True
+        logging.warning(
+            "Network check failed for %s (%s/%s); waiting %.1fs",
+            host,
+            attempt,
+            attempts,
+            delay_seconds,
+        )
+        await asyncio.sleep(delay_seconds)
+    return False
+
+
 # User-Agent List for Stealth
 USER_AGENTS = [
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
@@ -112,6 +163,7 @@ class NaverLandPlaywright:
     def __init__(self, screenshot_dir=None):
         self.complexes = {}
         self.captured_articles = {}
+        self.failed_regions = []
         self.region_name = ""
         self.screenshot_dir = Path(screenshot_dir or SCREENSHOT_DIR)
         ensure_directory(self.screenshot_dir)
@@ -160,9 +212,16 @@ class NaverLandPlaywright:
                         await asyncio.sleep(
                             random.uniform(0.5, 1.5)
                         )  # Random start delay
-                        await self.process_region_tab(page, url, dong_name)
+                        ok = await self.process_region_tab(page, url, dong_name)
+                        if not ok:
+                            self.failed_regions.append(
+                                {"name": dong_name, "url": url, "reason": "crawl_failed"}
+                            )
                     except Exception as e:
                         logging.error(f"❌ Failed processing {url}: {e}")
+                        self.failed_regions.append(
+                            {"name": dong_name, "url": url, "reason": str(e)}
+                        )
                     finally:
                         await context.close()
 
@@ -182,40 +241,111 @@ class NaverLandPlaywright:
                 logging.error(f"❌ Failed to save complexes metadata: {e}")
 
             # 2) Save prices only if we have articles
+            saved_rows = 0
+            save_failed = False
             try:
                 df = self.process_data()
                 if not df.empty:
                     save_to_db(df)
-                    logging.info(f"✅ Saved {len(df)} rows to DB.")
+                    saved_rows = len(df)
+                    logging.info(f"✅ Saved {saved_rows} rows to DB.")
                 else:
                     logging.warning("⚠️ No data rows generated (no article/prices).")
             except Exception as e:
                 logging.error(f"❌ Failed to save DB: {e}")
+                save_failed = True
 
             await browser.close()
 
+            target_count = len(target_urls)
+            failed_count = len(self.failed_regions)
+            failed_ratio = failed_count / target_count if target_count else 0
+
+            if failed_count:
+                sample = self.failed_regions[:10]
+                logging.error(
+                    "❌ Failed regions: %s/%s (%.1f%%), sample=%s",
+                    failed_count,
+                    target_count,
+                    failed_ratio * 100,
+                    sample,
+                )
+
+            if not target_count:
+                return False
+            if save_failed or saved_rows <= 0:
+                return False
+            if failed_ratio > MAX_FAILED_REGION_RATIO:
+                logging.error(
+                    "❌ Failed region ratio %.1f%% exceeds allowed %.1f%%",
+                    failed_ratio * 100,
+                    MAX_FAILED_REGION_RATIO * 100,
+                )
+                return False
+
+            return True
+
     async def process_region_tab(self, page, target_url, dong_name):
+        """Retry a region when transient network issues leave the page empty."""
+        for attempt in range(1, NAVIGATION_RETRY_ATTEMPTS + 1):
+            ok = await self._process_region_tab_once(page, target_url, dong_name)
+            if ok:
+                return True
+
+            if attempt < NAVIGATION_RETRY_ATTEMPTS:
+                logging.warning(
+                    "Retrying region %s after failed/empty result attempt %s/%s",
+                    target_url,
+                    attempt,
+                    NAVIGATION_RETRY_ATTEMPTS,
+                )
+                await wait_for_network_ready()
+                await page.wait_for_timeout(5000 * attempt)
+
+        return False
+
+    async def _process_region_tab_once(self, page, target_url, dong_name):
         """Logic for processing a single region tab"""
-        try:
-            # 1. Go to Region
-            await page.goto(target_url, wait_until="domcontentloaded", timeout=60000)
-
-            # Robust Wait: Wait for API response that loads the list
+        for attempt in range(1, NAVIGATION_RETRY_ATTEMPTS + 1):
             try:
-                async with page.expect_response(
-                    lambda response: (
-                        "complex" in response.url and response.status == 200
-                    ),
-                    timeout=10000,
-                ):
-                    pass
-            except:
-                pass  # Proceed
+                # 1. Go to Region
+                await page.goto(
+                    target_url, wait_until="domcontentloaded", timeout=60000
+                )
 
-            await page.wait_for_timeout(random.uniform(2000, 3000))
-        except Exception as e:
-            logging.error(f"Failed to load region page {target_url}: {e}")
-            return
+                # Robust Wait: Wait for API response that loads the list
+                try:
+                    async with page.expect_response(
+                        lambda response: (
+                            "complex" in response.url and response.status == 200
+                        ),
+                        timeout=10000,
+                    ):
+                        pass
+                except:
+                    pass  # Proceed
+
+                await page.wait_for_timeout(random.uniform(2000, 3000))
+                break
+            except Exception as e:
+                logging.warning(
+                    "Region navigation failed %s attempt %s/%s: %s",
+                    target_url,
+                    attempt,
+                    NAVIGATION_RETRY_ATTEMPTS,
+                    e,
+                )
+                if attempt >= NAVIGATION_RETRY_ATTEMPTS or not is_transient_navigation_error(e):
+                    logging.error(f"Failed to load region page {target_url}: {e}")
+                    return False
+
+                network_ready = await wait_for_network_ready()
+                if not network_ready:
+                    logging.warning(
+                        "Network did not pass readiness check before retrying %s",
+                        target_url,
+                    )
+                await page.wait_for_timeout(5000 * attempt)
 
         # 2. Load All Complexes (Pagination)
         logging.info("Loading full list...")
@@ -308,7 +438,7 @@ class NaverLandPlaywright:
             )
             await page.screenshot(path=str(screenshot_path))
             logging.error(f"Saved debug screenshot to {screenshot_path}")
-            return
+            return False
 
         # ========================================================
         # [OPTIMIZATION] Parallel Fetch of Details (Complex & Pyeong)
@@ -438,6 +568,8 @@ class NaverLandPlaywright:
                         return current_page
 
                     try:
+                        if is_transient_navigation_error(e):
+                            await wait_for_network_ready()
                         current_page = await recreate_page(current_page)
                         await asyncio.sleep(random.uniform(0.2, 0.6))
                     except Exception as recreate_e:
@@ -452,6 +584,8 @@ class NaverLandPlaywright:
         for cid in filtered_cids:
             for t_type in ["A1", "B1"]:
                 page = await visit_detail_with_retries(page, cid, t_type)
+
+        return True
 
     async def _visit_detail_page(self, page, url):
         """Helper to visit page and perform scrolling"""
@@ -1317,7 +1451,9 @@ async def main():
         print(f"🚀 Starting Sharded Crawl with {len(direct_targets)} locations...")
         crawler = NaverLandPlaywright(screenshot_dir=SCREENSHOT_DIR)
         urls = [(t["name"], t["url"]) for t in direct_targets]
-        await crawler.run_test(urls, headless=HEADLESS_MODE)
+        ok = await crawler.run_test(urls, headless=HEADLESS_MODE)
+        if not ok:
+            raise SystemExit(1)
 
     else:
         if not regions_to_process and TARGET_URLS:
@@ -1342,7 +1478,9 @@ async def main():
             crawler = NaverLandPlaywright(screenshot_dir=SCREENSHOT_DIR)
             crawler.region_name = region_name
             print(f"🚀 Crawling {region_name} (URLs: {len(current_urls)})...")
-            await crawler.run_test(current_urls, headless=HEADLESS_MODE)
+            ok = await crawler.run_test(current_urls, headless=HEADLESS_MODE)
+            if not ok:
+                raise SystemExit(1)
 
 
 if __name__ == "__main__":

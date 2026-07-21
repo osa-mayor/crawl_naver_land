@@ -69,6 +69,10 @@ class CrawlSettings:
     max_api_prefetch_concurrency: int
     retry_failed_shards: int
     shard_timeout_minutes: int
+    navigation_retry_attempts: int
+    network_ready_retry_attempts: int
+    network_ready_retry_delay_seconds: float
+    max_failed_region_ratio: float
 
 
 @dataclass(frozen=True)
@@ -152,6 +156,14 @@ def load_config(path: str | Path) -> LocalConfig:
         ),
         retry_failed_shards=int(crawl_raw.get("retry_failed_shards", 1)),
         shard_timeout_minutes=int(crawl_raw.get("shard_timeout_minutes", 240)),
+        navigation_retry_attempts=int(crawl_raw.get("navigation_retry_attempts", 3)),
+        network_ready_retry_attempts=int(
+            crawl_raw.get("network_ready_retry_attempts", 12)
+        ),
+        network_ready_retry_delay_seconds=float(
+            crawl_raw.get("network_ready_retry_delay_seconds", 5)
+        ),
+        max_failed_region_ratio=float(crawl_raw.get("max_failed_region_ratio", 0.25)),
     )
 
     export_jobs = [

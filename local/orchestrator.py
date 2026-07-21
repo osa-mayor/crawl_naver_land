@@ -5,9 +5,11 @@ import json
 import os
 import signal
 import shutil
+import socket
 import sqlite3
 import subprocess
 import sys
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import asdict
 from datetime import datetime, timedelta
@@ -58,6 +60,44 @@ def default_summary(run_id: str, run_dir: Path) -> dict:
 
 class PipelineError(RuntimeError):
     pass
+
+
+def append_log(path: Path, message: str) -> None:
+    ensure_dir(path.parent)
+    with path.open("a", encoding="utf-8") as f:
+        f.write(message.rstrip() + "\n")
+
+
+def can_connect(host: str, port: int = 443, timeout: float = 5.0) -> bool:
+    try:
+        with socket.create_connection((host, port), timeout=timeout):
+            return True
+    except OSError:
+        return False
+
+
+def wait_for_network_ready(
+    hosts: list[str],
+    log_path: Path,
+    attempts: int = 12,
+    delay_seconds: float = 5.0,
+) -> bool:
+    for attempt in range(1, attempts + 1):
+        failed_hosts = [host for host in hosts if not can_connect(host)]
+        if not failed_hosts:
+            return True
+
+        append_log(
+            log_path,
+            (
+                f"NETWORK_WAIT: failed hosts={failed_hosts} "
+                f"attempt={attempt}/{attempts}; sleeping {delay_seconds}s"
+            ),
+        )
+        time.sleep(delay_seconds)
+
+    append_log(log_path, f"NETWORK_FAILED: hosts did not recover: {hosts}")
+    return False
 
 
 def load_token_text(token_file: Path) -> str:
@@ -143,6 +183,14 @@ def build_base_env(config: LocalConfig, paths: dict[str, Path]) -> dict[str, str
             "MAX_API_PREFETCH_CONCURRENCY": str(
                 config.crawl.max_api_prefetch_concurrency
             ),
+            "NAVIGATION_RETRY_ATTEMPTS": str(config.crawl.navigation_retry_attempts),
+            "NETWORK_READY_RETRY_ATTEMPTS": str(
+                config.crawl.network_ready_retry_attempts
+            ),
+            "NETWORK_READY_RETRY_DELAY_SECONDS": str(
+                config.crawl.network_ready_retry_delay_seconds
+            ),
+            "MAX_FAILED_REGION_RATIO": str(config.crawl.max_failed_region_ratio),
             "NAVER_REGION_JSON_PATH": str(config.region_json_path),
             "CRAWLER_SCREENSHOT_DIR": str(paths["screenshots"]),
         }
@@ -253,6 +301,15 @@ def run_shard(
     max_attempts = config.crawl.retry_failed_shards + 1
     while attempts < max_attempts:
         attempts += 1
+        network_ok = wait_for_network_ready(
+            ["fin.land.naver.com"],
+            paths["logs"] / f"network_shard_{shard_index}.log",
+            attempts=config.crawl.network_ready_retry_attempts,
+            delay_seconds=config.crawl.network_ready_retry_delay_seconds,
+        )
+        if not network_ok:
+            continue
+
         archive_incomplete_shard_db(shard_db, f"before_attempt_{attempts}")
         result = run_command(
             command,
@@ -370,15 +427,26 @@ def upload_files(
             "--token-file",
             str(config.google_drive.token_file),
         ]
-        result = run_command(
-            command,
-            paths["logs"] / f"upload_{file_path.name}.log",
-            config.project_root,
-        )
+        result = None
+        max_attempts = config.crawl.retry_failed_shards + 1
+        for attempt in range(1, max_attempts + 1):
+            wait_for_network_ready(
+                ["oauth2.googleapis.com", "www.googleapis.com"],
+                paths["logs"] / f"network_upload_{file_path.name}.log",
+                attempts=config.crawl.network_ready_retry_attempts,
+                delay_seconds=config.crawl.network_ready_retry_delay_seconds,
+            )
+            result = run_command(
+                command,
+                paths["logs"] / f"upload_{file_path.name}.attempt_{attempt}.log",
+                config.project_root,
+            )
+            if result.returncode == 0:
+                break
         uploads.append(
             {
                 "file": str(file_path),
-                "success": result.returncode == 0,
+                "success": bool(result and result.returncode == 0),
             }
         )
     return uploads
@@ -389,7 +457,16 @@ def build_discord_message(summary: dict) -> str:
     if summary["status"] == "success":
         return f"✅ [Local Crawl Success] {run_id} completed. DB count={summary['db_count']}, excel files={len(summary['excel_files'])}"
     if summary["status"] == "partial_success":
-        return f"⚠️ [Local Crawl Partial Success] {run_id} completed with failed shards={summary['failed_shards']}"
+        failed_uploads = [
+            item.get("file")
+            for item in summary.get("google_drive_uploads", [])
+            if not item.get("success")
+        ]
+        return (
+            f"⚠️ [Local Crawl Partial Success] {run_id} completed with "
+            f"failed shards={summary['failed_shards']}, "
+            f"failed uploads={len(failed_uploads)}"
+        )
     if summary["status"] == "skipped_due_to_lock":
         return (
             f"⏭️ [Local Crawl Skipped] {run_id} skipped because another run is active."
@@ -418,8 +495,23 @@ def notify_discord(
         "--webhook",
         webhook_url,
     ]
-    result = run_command(command, paths["logs"] / "discord.log", config.project_root)
-    return {"success": result.returncode == 0, "message": message}
+    result = None
+    max_attempts = config.crawl.retry_failed_shards + 1
+    for attempt in range(1, max_attempts + 1):
+        wait_for_network_ready(
+            ["discord.com"],
+            paths["logs"] / "network_discord.log",
+            attempts=config.crawl.network_ready_retry_attempts,
+            delay_seconds=config.crawl.network_ready_retry_delay_seconds,
+        )
+        result = run_command(
+            command,
+            paths["logs"] / f"discord.attempt_{attempt}.log",
+            config.project_root,
+        )
+        if result.returncode == 0:
+            break
+    return {"success": bool(result and result.returncode == 0), "message": message}
 
 
 def cleanup_old_runs(config: LocalConfig, paths: dict[str, Path]) -> None:
@@ -485,7 +577,13 @@ def run_pipeline(config: LocalConfig, run_id: str) -> int:
                 config, paths, upload_targets
             )
 
-            if summary["failed_shards"]:
+            upload_failures = [
+                upload
+                for upload in summary["google_drive_uploads"]
+                if not upload.get("success")
+            ]
+
+            if summary["failed_shards"] or upload_failures:
                 summary["status"] = "partial_success"
             else:
                 summary["status"] = "success"
