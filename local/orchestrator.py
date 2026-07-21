@@ -193,6 +193,15 @@ def build_base_env(config: LocalConfig, paths: dict[str, Path]) -> dict[str, str
             ),
             "MAX_FAILED_REGION_RATIO": str(config.crawl.max_failed_region_ratio),
             "MAX_RATE_LIMIT_RESPONSES": str(config.crawl.max_rate_limit_responses),
+            "ARTICLE_RESPONSE_TIMEOUT_MS": str(
+                config.crawl.article_response_timeout_ms
+            ),
+            "MAX_ARTICLE_MISSING_COMPLEX_RATIO": str(
+                config.crawl.max_article_missing_complex_ratio
+            ),
+            "MIN_COMPLEXES_FOR_ARTICLE_CHECK": str(
+                config.crawl.min_complexes_for_article_check
+            ),
             "NAVER_REGION_JSON_PATH": str(config.region_json_path),
             "CRAWLER_SCREENSHOT_DIR": str(paths["screenshots"]),
         }

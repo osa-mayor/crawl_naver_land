@@ -76,6 +76,9 @@ class CrawlSettings:
     min_total_price_records: int
     min_priced_complex_ratio: float
     max_rate_limit_responses: int
+    article_response_timeout_ms: int
+    max_article_missing_complex_ratio: float
+    min_complexes_for_article_check: int
 
 
 @dataclass(frozen=True)
@@ -172,6 +175,15 @@ def load_config(path: str | Path) -> LocalConfig:
             crawl_raw.get("min_priced_complex_ratio", 0.55)
         ),
         max_rate_limit_responses=int(crawl_raw.get("max_rate_limit_responses", 20)),
+        article_response_timeout_ms=int(
+            crawl_raw.get("article_response_timeout_ms", 15000)
+        ),
+        max_article_missing_complex_ratio=float(
+            crawl_raw.get("max_article_missing_complex_ratio", 0.50)
+        ),
+        min_complexes_for_article_check=int(
+            crawl_raw.get("min_complexes_for_article_check", 20)
+        ),
     )
 
     export_jobs = [

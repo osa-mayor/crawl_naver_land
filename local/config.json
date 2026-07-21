@@ -29,7 +29,10 @@
     "max_failed_region_ratio": 0.25,
     "min_total_price_records": 70000,
     "min_priced_complex_ratio": 0.55,
-    "max_rate_limit_responses": 20
+    "max_rate_limit_responses": 20,
+    "article_response_timeout_ms": 15000,
+    "max_article_missing_complex_ratio": 0.5,
+    "min_complexes_for_article_check": 20
   },
   "exports": [
     {

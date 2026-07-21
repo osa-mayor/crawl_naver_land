@@ -12,6 +12,7 @@ import argparse
 import sys
 import socket
 from pathlib import Path
+from urllib.parse import parse_qs, urlparse
 from land_selectors import NaverLandSelectors
 
 # ==========================================
@@ -39,6 +40,11 @@ NETWORK_READY_RETRY_DELAY_SECONDS = float(
 )
 MAX_FAILED_REGION_RATIO = float(os.getenv("MAX_FAILED_REGION_RATIO", 0.25))
 MAX_RATE_LIMIT_RESPONSES = int(os.getenv("MAX_RATE_LIMIT_RESPONSES", 20))
+ARTICLE_RESPONSE_TIMEOUT_MS = int(os.getenv("ARTICLE_RESPONSE_TIMEOUT_MS", 15000))
+MAX_ARTICLE_MISSING_COMPLEX_RATIO = float(
+    os.getenv("MAX_ARTICLE_MISSING_COMPLEX_RATIO", 0.50)
+)
+MIN_COMPLEXES_FOR_ARTICLE_CHECK = int(os.getenv("MIN_COMPLEXES_FOR_ARTICLE_CHECK", 20))
 HEADLESS_MODE = True  # Set to False to watch process
 BASE_DIR = Path(__file__).resolve().parent
 DB_PATH = str(BASE_DIR / "real_estate.db")  # SQLite Database File
@@ -160,10 +166,18 @@ class DataProcessor:
         return f"{eok}억"
 
 
+class ArticleResponseUnavailable(RuntimeError):
+    pass
+
+
 class NaverLandPlaywright:
     def __init__(self, screenshot_dir=None):
         self.complexes = {}
         self.captured_articles = {}
+        self.article_response_stats = {}
+        self.seen_article_response_keys = set()
+        self.article_attempts = set()
+        self.article_missing_responses = []
         self.failed_regions = []
         self.rate_limit_count = 0
         self.region_name = ""
@@ -180,6 +194,247 @@ class NaverLandPlaywright:
             "extra_http_headers": {
                 "Accept-Language": "ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7"
             },
+        }
+
+    @staticmethod
+    def _request_post_json(request):
+        try:
+            value = getattr(request, "post_data_json", None)
+            if callable(value):
+                value = value()
+            return value if isinstance(value, dict) else {}
+        except Exception:
+            return {}
+
+    @staticmethod
+    def _article_query_values(url):
+        try:
+            query = parse_qs(urlparse(url).query)
+        except Exception:
+            return {}
+        return {key: values[0] for key, values in query.items() if values}
+
+    @staticmethod
+    def _is_article_api_url(url):
+        if "front-api/v1" not in url:
+            return False
+        # These are metadata endpoints fetched separately; they are not article results.
+        if "pyeongList" in url or "/complex?" in url:
+            return False
+        return True
+
+    def _extract_article_identity(self, response):
+        url = response.url
+        query = self._article_query_values(url)
+        post = self._request_post_json(response.request)
+
+        cid = query.get("complexNumber") or post.get("complexNumber")
+        trade_type = (
+            query.get("tradeType")
+            or query.get("articleTradeTypes")
+            or query.get("tradeTypes")
+            or post.get("tradeType")
+            or post.get("articleTradeTypes")
+            or post.get("tradeTypes")
+        )
+
+        if isinstance(trade_type, list):
+            trade_type = trade_type[0] if trade_type else None
+        if cid is not None:
+            cid = str(cid)
+        if trade_type is not None:
+            trade_type = str(trade_type)
+
+        return cid, trade_type
+
+    def _is_expected_article_response(self, response, cid, trade_type):
+        if not self._is_article_api_url(response.url):
+            return False
+
+        found_cid, found_trade_type = self._extract_article_identity(response)
+        if found_cid != str(cid):
+            return False
+
+        # Some endpoints may use articleTradeTypes/tradeTypes; require the target
+        # trade type when the response exposes one.
+        if found_trade_type and str(trade_type) not in found_trade_type.split(","):
+            return False
+        return True
+
+    @staticmethod
+    def _extract_article_items(data):
+        if not isinstance(data, dict) or "result" not in data:
+            return []
+
+        result = data["result"]
+        if isinstance(result, list):
+            return result
+        if isinstance(result, dict) and "list" in result:
+            value = result["list"]
+            return value if isinstance(value, list) else []
+        return []
+
+    def _article_response_key(self, response):
+        post_data = ""
+        try:
+            post_data = response.request.post_data or ""
+        except Exception:
+            pass
+        return (response.status, response.url, post_data)
+
+    @staticmethod
+    def _trade_type_keys(trade_type):
+        if not trade_type:
+            return ["UNKNOWN"]
+        if isinstance(trade_type, list):
+            values = trade_type
+        else:
+            values = str(trade_type).split(",")
+        keys = [str(value).strip() for value in values if str(value).strip()]
+        return keys or ["UNKNOWN"]
+
+    def _article_stats_for(self, cid, trade_type):
+        return self.article_response_stats.setdefault(
+            (str(cid), str(trade_type)),
+            {
+                "response_count": 0,
+                "status_counts": {},
+                "item_count": 0,
+                "empty_200_count": 0,
+                "non_200_count": 0,
+                "json_error_count": 0,
+                "last_url": "",
+            },
+        )
+
+    async def _record_article_response(self, response):
+        if not self._is_article_api_url(response.url):
+            return False
+
+        response_key = self._article_response_key(response)
+        if response_key in self.seen_article_response_keys:
+            return True
+        self.seen_article_response_keys.add(response_key)
+
+        cid, trade_type = self._extract_article_identity(response)
+        if not cid:
+            return False
+
+        status = int(response.status)
+        stats_list = [
+            self._article_stats_for(cid, key) for key in self._trade_type_keys(trade_type)
+        ]
+        for stats in stats_list:
+            stats["response_count"] += 1
+            stats["status_counts"][str(status)] = (
+                stats["status_counts"].get(str(status), 0) + 1
+            )
+            stats["last_url"] = response.url
+
+        if status == 429:
+            self.rate_limit_count += 1
+            logging.error("Naver front-api rate limited response: %s", response.url)
+
+        if status != 200:
+            for stats in stats_list:
+                stats["non_200_count"] += 1
+            return True
+
+        try:
+            data = await response.json()
+        except Exception:
+            for stats in stats_list:
+                stats["json_error_count"] += 1
+            logging.warning("Article response JSON parse failed: %s", response.url)
+            return True
+
+        items = self._extract_article_items(data)
+        if items:
+            if cid not in self.captured_articles:
+                self.captured_articles[cid] = []
+            self.captured_articles[cid].extend(items)
+            for stats in stats_list:
+                stats["item_count"] += len(items)
+        else:
+            for stats in stats_list:
+                stats["empty_200_count"] += 1
+
+        return True
+
+    def _has_acceptable_article_response(self, cid, trade_type):
+        stats = self.article_response_stats.get((str(cid), str(trade_type)))
+        if not stats:
+            return False
+        return int(stats["status_counts"].get("200", 0)) > 0
+
+    async def _visit_detail_page_and_wait_for_article(self, page, url, cid, trade_type):
+        try:
+            async with page.expect_response(
+                lambda response: self._is_expected_article_response(
+                    response, cid, trade_type
+                ),
+                timeout=ARTICLE_RESPONSE_TIMEOUT_MS,
+            ) as response_info:
+                await self._visit_detail_page(page, url)
+            response = await response_info.value
+            await self._record_article_response(response)
+        except Exception:
+            return self._has_acceptable_article_response(cid, trade_type)
+        return self._has_acceptable_article_response(cid, trade_type)
+
+    def _summarize_article_capture(self, filtered_cids):
+        attempted_pairs = {(str(cid), t_type) for cid in filtered_cids for t_type in ["A1", "B1"]}
+        observed_pairs = attempted_pairs & set(self.article_response_stats.keys())
+        missing_pairs = attempted_pairs - observed_pairs
+        non_200_pairs = {
+            key
+            for key in observed_pairs
+            if self.article_response_stats[key].get("non_200_count", 0) > 0
+            and not self._has_acceptable_article_response(*key)
+        }
+        empty_pairs = {
+            key
+            for key in observed_pairs
+            if self.article_response_stats[key].get("empty_200_count", 0) > 0
+            and self.article_response_stats[key].get("item_count", 0) == 0
+        }
+        nonempty_pairs = {
+            key
+            for key in observed_pairs
+            if self.article_response_stats[key].get("item_count", 0) > 0
+        }
+
+        observed_complexes = {
+            cid for cid, _ in observed_pairs
+        }
+        complexes_with_articles = {
+            str(cid) for cid in filtered_cids if str(cid) in self.captured_articles
+        }
+        missing_all_complexes = {
+            str(cid) for cid in filtered_cids if str(cid) not in observed_complexes
+        }
+        empty_confirmed_complexes = {
+            str(cid)
+            for cid in filtered_cids
+            if str(cid) not in complexes_with_articles
+            and (str(cid), "A1") in empty_pairs
+            and (str(cid), "B1") in empty_pairs
+        }
+
+        return {
+            "target_complexes": len(filtered_cids),
+            "attempted_pairs": len(attempted_pairs),
+            "observed_pairs": len(observed_pairs),
+            "nonempty_pairs": len(nonempty_pairs),
+            "empty_pairs": len(empty_pairs),
+            "non_200_pairs": len(non_200_pairs),
+            "missing_pairs": len(missing_pairs),
+            "observed_complexes": len(observed_complexes),
+            "complexes_with_articles": len(complexes_with_articles),
+            "missing_all_complexes": len(missing_all_complexes),
+            "empty_confirmed_complexes": len(empty_confirmed_complexes),
+            "missing_pair_sample": sorted(list(missing_pairs))[:10],
+            "non_200_pair_sample": sorted(list(non_200_pairs))[:10],
         }
 
     async def run_test(self, target_urls, headless=True):
@@ -505,47 +760,7 @@ class NaverLandPlaywright:
         # 4. API Interception Setup
         async def handle_response(response):
             try:
-                url = response.url
-                if "front-api/v1" in url and response.status == 429:
-                    self.rate_limit_count += 1
-                    logging.error(
-                        "Naver front-api rate limited response: %s", url
-                    )
-                    return
-
-                if "front-api/v1" in url and response.status == 200:
-                    # Filter out the detail APIs we just called manually to avoid noise
-                    if "pyeongList" in url or "/complex?" in url:
-                        return
-
-                    data = await response.json()
-
-                    items = []
-                    if "result" in data:
-                        res = data["result"]
-                        if isinstance(res, list):
-                            items = res
-                        elif isinstance(res, dict) and "list" in res:
-                            items = res["list"]
-
-                    if items:
-                        found_cid = None
-                        match = re.search(r"complexNumber=(\d+)", url)
-                        if match:
-                            found_cid = match.group(1)
-
-                        if not found_cid:
-                            try:
-                                post = response.request.post_data_json
-                                if post and "complexNumber" in post:
-                                    found_cid = str(post["complexNumber"])
-                            except:
-                                pass
-
-                        if found_cid:
-                            if found_cid not in self.captured_articles:
-                                self.captured_articles[found_cid] = []
-                            self.captured_articles[found_cid].extend(items)
+                await self._record_article_response(response)
             except:
                 pass
 
@@ -570,10 +785,34 @@ class NaverLandPlaywright:
 
             for attempt in range(1, retries + 2):
                 try:
-                    await asyncio.wait_for(
-                        self._visit_detail_page(current_page, detail_url), timeout=30.0
+                    if await asyncio.wait_for(
+                        self._visit_detail_page_and_wait_for_article(
+                            current_page, detail_url, cid, t_type
+                        ),
+                        timeout=45.0,
+                    ):
+                        self.article_attempts.add((str(cid), str(t_type)))
+                        return current_page
+
+                    raise ArticleResponseUnavailable(
+                        f"article response missing or non-200 for {cid} ({t_type})"
                     )
-                    return current_page
+                except ArticleResponseUnavailable as e:
+                    logging.warning(
+                        "Article response unavailable %s (%s) attempt %s/%s: %s",
+                        cid,
+                        t_type,
+                        attempt,
+                        retries + 1,
+                        e,
+                    )
+                    if attempt > retries:
+                        self.article_missing_responses.append(
+                            {"complex_no": str(cid), "trade_type": str(t_type)}
+                        )
+                        return current_page
+
+                    await asyncio.sleep(random.uniform(0.5, 1.0))
                 except asyncio.CancelledError:
                     raise
                 except Exception as e:
@@ -600,6 +839,27 @@ class NaverLandPlaywright:
         for cid in filtered_cids:
             for t_type in ["A1", "B1"]:
                 page = await visit_detail_with_retries(page, cid, t_type)
+
+        article_summary = self._summarize_article_capture(filtered_cids)
+        logging.info("Article capture summary for %s: %s", dong_name, article_summary)
+
+        if len(filtered_cids) >= MIN_COMPLEXES_FOR_ARTICLE_CHECK:
+            missing_ratio = (
+                article_summary["missing_all_complexes"] / len(filtered_cids)
+                if filtered_cids
+                else 0
+            )
+            if missing_ratio > MAX_ARTICLE_MISSING_COMPLEX_RATIO:
+                logging.error(
+                    "Article response capture failed for %s: missing_all_complexes=%s/%s "
+                    "(%.1f%%), allowed %.1f%%. This is capture failure, not confirmed no-listing.",
+                    dong_name,
+                    article_summary["missing_all_complexes"],
+                    len(filtered_cids),
+                    missing_ratio * 100,
+                    MAX_ARTICLE_MISSING_COMPLEX_RATIO * 100,
+                )
+                return False
 
         return True
 
