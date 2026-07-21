@@ -5,6 +5,7 @@ import json
 import os
 import signal
 import shutil
+import sqlite3
 import subprocess
 import sys
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -212,6 +213,17 @@ def archive_incomplete_shard_db(shard_db: Path, reason: str) -> None:
     shard_db.rename(archive_path)
 
 
+def shard_price_count(shard_db: Path) -> int:
+    if not shard_db.exists():
+        return 0
+    try:
+        with sqlite3.connect(shard_db) as conn:
+            row = conn.execute("select count(*) from prices").fetchone()
+            return int(row[0] if row else 0)
+    except sqlite3.Error:
+        return 0
+
+
 def run_shard(
     config: LocalConfig, paths: dict[str, Path], shard_index: int
 ) -> tuple[bool, dict]:
@@ -249,12 +261,14 @@ def run_shard(
             env,
             timeout_seconds=config.crawl.shard_timeout_minutes * 60,
         )
-        if result.returncode == 0 and shard_db.exists():
+        price_count = shard_price_count(shard_db)
+        if result.returncode == 0 and price_count > 0:
             return True, {
                 "shard": shard_index,
                 "attempts": attempts,
                 "db_path": str(shard_db),
                 "log_path": str(shard_log),
+                "price_count": price_count,
             }
 
     archive_incomplete_shard_db(shard_db, f"failed_after_{attempts}_attempts")
