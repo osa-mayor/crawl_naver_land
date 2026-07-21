@@ -39,12 +39,6 @@ NETWORK_READY_RETRY_DELAY_SECONDS = float(
 )
 MAX_FAILED_REGION_RATIO = float(os.getenv("MAX_FAILED_REGION_RATIO", 0.25))
 MAX_RATE_LIMIT_RESPONSES = int(os.getenv("MAX_RATE_LIMIT_RESPONSES", 20))
-ARTICLE_LIST_PAGE_SIZE = int(os.getenv("ARTICLE_LIST_PAGE_SIZE", 30))
-MAX_ARTICLE_LIST_PAGES = int(os.getenv("MAX_ARTICLE_LIST_PAGES", 20))
-ARTICLE_API_RETRY_ATTEMPTS = int(os.getenv("ARTICLE_API_RETRY_ATTEMPTS", 3))
-ARTICLE_API_RETRY_BASE_DELAY_SECONDS = float(
-    os.getenv("ARTICLE_API_RETRY_BASE_DELAY_SECONDS", 2)
-)
 HEADLESS_MODE = True  # Set to False to watch process
 BASE_DIR = Path(__file__).resolve().parent
 DB_PATH = str(BASE_DIR / "real_estate.db")  # SQLite Database File
@@ -106,41 +100,6 @@ TRANSIENT_NAVIGATION_ERROR_MARKERS = (
 def is_transient_navigation_error(error) -> bool:
     message = str(error)
     return any(marker in message for marker in TRANSIENT_NAVIGATION_ERROR_MARKERS)
-
-
-def extract_article_result(data):
-    """Return article-list items plus pagination metadata from Naver payloads."""
-    result = data.get("result") if isinstance(data, dict) else None
-    if isinstance(result, list):
-        return result, False, [], None
-    if not isinstance(result, dict):
-        return [], False, [], None
-
-    items = result.get("list") or []
-    if not isinstance(items, list):
-        items = []
-    last_info = result.get("lastInfo") or []
-    has_next = bool(result.get("hasNextPage"))
-    total_count = result.get("totalCount")
-    return items, has_next, last_info, total_count
-
-
-def article_item_identity(item):
-    """Stable identity used to avoid double-counting captured article groups."""
-    if not isinstance(item, dict):
-        return repr(item)
-
-    candidates = [item]
-    representative = item.get("representativeArticleInfo")
-    if isinstance(representative, dict):
-        candidates.append(representative)
-
-    for candidate in candidates:
-        article_number = candidate.get("articleNumber")
-        if article_number:
-            return str(article_number)
-
-    return json.dumps(item, ensure_ascii=False, sort_keys=True)
 
 
 def can_connect(host: str, port: int = 443, timeout: float = 5.0) -> bool:
@@ -205,7 +164,6 @@ class NaverLandPlaywright:
     def __init__(self, screenshot_dir=None):
         self.complexes = {}
         self.captured_articles = {}
-        self._captured_article_identities = {}
         self.failed_regions = []
         self.rate_limit_count = 0
         self.region_name = ""
@@ -335,147 +293,6 @@ class NaverLandPlaywright:
                 return False
 
             return True
-
-    def capture_article_items(self, cid, items):
-        if not items:
-            return 0
-
-        cid = str(cid)
-        captured = self.captured_articles.setdefault(cid, [])
-        seen = self._captured_article_identities.setdefault(cid, set())
-
-        appended = 0
-        for item in items:
-            identity = article_item_identity(item)
-            if identity in seen:
-                continue
-            seen.add(identity)
-            captured.append(item)
-            appended += 1
-        return appended
-
-    async def fetch_article_list_for_complex(self, page, cid, trade_type):
-        """Fetch article lists directly instead of relying on passive page-response capture."""
-        api_url = "https://fin.land.naver.com/front-api/v1/complex/article/list"
-        last_info = []
-        total_appended = 0
-
-        for page_number in range(1, MAX_ARTICLE_LIST_PAGES + 1):
-            payload = {
-                "size": ARTICLE_LIST_PAGE_SIZE,
-                "complexNumber": str(cid),
-                "tradeTypes": [trade_type],
-                "pyeongTypes": [],
-                "dongNumbers": [],
-                "userChannelType": "PC",
-                "articleSortType": "PRICE_ASC",
-                "lastInfo": last_info,
-            }
-
-            page_loaded = False
-            for attempt in range(1, ARTICLE_API_RETRY_ATTEMPTS + 1):
-                try:
-                    response = await page.request.post(
-                        api_url,
-                        data=payload,
-                        headers={
-                            "Accept": "application/json, text/plain, */*",
-                            "Content-Type": "application/json",
-                            "Referer": page.url,
-                        },
-                        timeout=20000,
-                    )
-
-                    if response.status == 429:
-                        self.rate_limit_count += 1
-                        logging.error(
-                            "Naver article API rate limited: cid=%s trade=%s page=%s attempt=%s/%s",
-                            cid,
-                            trade_type,
-                            page_number,
-                            attempt,
-                            ARTICLE_API_RETRY_ATTEMPTS,
-                        )
-                        await asyncio.sleep(
-                            ARTICLE_API_RETRY_BASE_DELAY_SECONDS * attempt
-                            + random.uniform(0.2, 0.8)
-                        )
-                        continue
-
-                    if response.status >= 500 or response.status in (408, 425):
-                        logging.warning(
-                            "Naver article API transient status=%s: cid=%s trade=%s page=%s attempt=%s/%s",
-                            response.status,
-                            cid,
-                            trade_type,
-                            page_number,
-                            attempt,
-                            ARTICLE_API_RETRY_ATTEMPTS,
-                        )
-                        await asyncio.sleep(
-                            ARTICLE_API_RETRY_BASE_DELAY_SECONDS * attempt
-                            + random.uniform(0.2, 0.8)
-                        )
-                        continue
-
-                    if response.status != 200:
-                        logging.warning(
-                            "Naver article API returned status=%s: cid=%s trade=%s page=%s",
-                            response.status,
-                            cid,
-                            trade_type,
-                            page_number,
-                        )
-                        return total_appended
-
-                    data = await response.json()
-                    items, has_next, next_last_info, total_count = extract_article_result(
-                        data
-                    )
-                    appended = self.capture_article_items(cid, items)
-                    total_appended += appended
-                    page_loaded = True
-
-                    logging.info(
-                        "Article API captured cid=%s trade=%s page=%s items=%s appended=%s totalCount=%s hasNext=%s",
-                        cid,
-                        trade_type,
-                        page_number,
-                        len(items),
-                        appended,
-                        total_count,
-                        has_next,
-                    )
-
-                    if not has_next or not next_last_info:
-                        return total_appended
-                    last_info = next_last_info
-                    break
-                except Exception as e:
-                    logging.warning(
-                        "Naver article API error cid=%s trade=%s page=%s attempt=%s/%s: %s",
-                        cid,
-                        trade_type,
-                        page_number,
-                        attempt,
-                        ARTICLE_API_RETRY_ATTEMPTS,
-                        e,
-                    )
-                    await asyncio.sleep(
-                        ARTICLE_API_RETRY_BASE_DELAY_SECONDS * attempt
-                        + random.uniform(0.2, 0.8)
-                    )
-
-            if not page_loaded:
-                return total_appended
-
-        logging.warning(
-            "Naver article API page limit reached: cid=%s trade=%s max_pages=%s",
-            cid,
-            trade_type,
-            MAX_ARTICLE_LIST_PAGES,
-        )
-        return total_appended
 
     async def process_region_tab(self, page, target_url, dong_name):
         """Retry a region when transient network issues leave the page empty."""
@@ -702,7 +519,14 @@ class NaverLandPlaywright:
                         return
 
                     data = await response.json()
-                    items, _, _, _ = extract_article_result(data)
+
+                    items = []
+                    if "result" in data:
+                        res = data["result"]
+                        if isinstance(res, list):
+                            items = res
+                        elif isinstance(res, dict) and "list" in res:
+                            items = res["list"]
 
                     if items:
                         found_cid = None
@@ -719,43 +543,85 @@ class NaverLandPlaywright:
                                 pass
 
                         if found_cid:
-                            self.capture_article_items(found_cid, items)
+                            if found_cid not in self.captured_articles:
+                                self.captured_articles[found_cid] = []
+                            self.captured_articles[found_cid].extend(items)
             except:
                 pass
 
         page.on("response", handle_response)
 
-        # 5. Fetch article lists directly.
-        # The previous implementation navigated every complex detail page and only
-        # passively captured responses. That silently under-collected when Naver
-        # delayed/throttled article-list responses. Direct POST lets us retry,
-        # paginate, and log 429s explicitly while keeping the same result shape.
-        logging.info(
-            "Fetching article lists directly for %s complexes...", len(filtered_cids)
-        )
-        article_sem = asyncio.Semaphore(max(1, min(MAX_API_PREFETCH_CONCURRENCY, 2)))
+        async def recreate_page(current_page):
+            context = current_page.context
+            try:
+                await current_page.close()
+            except Exception:
+                pass
 
-        async def article_task(cid):
-            async with article_sem:
-                fetched = 0
-                for t_type in ["A1", "B1"]:
-                    fetched += await self.fetch_article_list_for_complex(
-                        page, cid, t_type
+            new_page = await context.new_page()
+            await new_page.add_init_script("""
+                Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
+            """)
+            new_page.on("response", handle_response)
+            return new_page
+
+        async def visit_detail_with_retries(current_page, cid, t_type, retries=2):
+            detail_url = f"https://fin.land.naver.com/complexes/{cid}?tab=article&tradeType={t_type}&articleTradeTypes={t_type}&articleSortingType=PRICE_ASC"
+
+            for attempt in range(1, retries + 2):
+                try:
+                    await asyncio.wait_for(
+                        self._visit_detail_page(current_page, detail_url), timeout=30.0
                     )
-                await asyncio.sleep(random.uniform(0.05, 0.2))
-                return fetched
+                    return current_page
+                except asyncio.CancelledError:
+                    raise
+                except Exception as e:
+                    logging.warning(
+                        f"Nav error {cid} ({t_type}) attempt {attempt}/{retries + 1}: {e}"
+                    )
+                    if attempt > retries:
+                        return current_page
 
-        article_counts = await asyncio.gather(
-            *[article_task(cid) for cid in filtered_cids]
-        )
-        logging.info(
-            "Article API fetch complete: complexes=%s captured_items=%s captured_complexes=%s",
-            len(filtered_cids),
-            sum(article_counts),
-            len(self.captured_articles),
-        )
+                    try:
+                        if is_transient_navigation_error(e):
+                            await wait_for_network_ready()
+                        current_page = await recreate_page(current_page)
+                        await asyncio.sleep(random.uniform(0.2, 0.6))
+                    except Exception as recreate_e:
+                        logging.error(
+                            f"Failed to recreate page for {cid}: {recreate_e}"
+                        )
+                        return current_page
+
+            return current_page
+
+        # 5. Visit Details (Trigger article list)
+        for cid in filtered_cids:
+            for t_type in ["A1", "B1"]:
+                page = await visit_detail_with_retries(page, cid, t_type)
 
         return True
+
+    async def _visit_detail_page(self, page, url):
+        """Helper to visit page and perform scrolling"""
+        # Reduce internal timeout to fail faster
+        await page.goto(url, wait_until="domcontentloaded", timeout=20000)
+        await page.wait_for_timeout(random.uniform(500, 1000))
+
+        last_height = await page.evaluate("document.body.scrollHeight")
+        no_change = 0
+        for _ in range(30):
+            await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+            await page.wait_for_timeout(random.uniform(300, 600))
+            new_height = await page.evaluate("document.body.scrollHeight")
+            if new_height == last_height:
+                no_change += 1
+                if no_change >= 2:
+                    break
+            else:
+                no_change = 0
+            last_height = new_height
 
     def process_data(self):
         processor = DataProcessor()
