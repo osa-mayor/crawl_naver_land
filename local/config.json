@@ -18,15 +18,18 @@
       "16-17",
       "18-19"
     ],
-    "max_local_parallel": 2,
+    "max_local_parallel": 1,
     "max_concurrent_pages": 2,
-    "max_api_prefetch_concurrency": 4,
+    "max_api_prefetch_concurrency": 2,
     "retry_failed_shards": 2,
     "shard_timeout_minutes": 240,
     "navigation_retry_attempts": 3,
     "network_ready_retry_attempts": 12,
     "network_ready_retry_delay_seconds": 5,
-    "max_failed_region_ratio": 0.25
+    "max_failed_region_ratio": 0.25,
+    "min_total_price_records": 70000,
+    "min_priced_complex_ratio": 0.55,
+    "max_rate_limit_responses": 20
   },
   "exports": [
     {

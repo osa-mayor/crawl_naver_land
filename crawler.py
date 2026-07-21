@@ -38,6 +38,7 @@ NETWORK_READY_RETRY_DELAY_SECONDS = float(
     os.getenv("NETWORK_READY_RETRY_DELAY_SECONDS", 5)
 )
 MAX_FAILED_REGION_RATIO = float(os.getenv("MAX_FAILED_REGION_RATIO", 0.25))
+MAX_RATE_LIMIT_RESPONSES = int(os.getenv("MAX_RATE_LIMIT_RESPONSES", 20))
 HEADLESS_MODE = True  # Set to False to watch process
 BASE_DIR = Path(__file__).resolve().parent
 DB_PATH = str(BASE_DIR / "real_estate.db")  # SQLite Database File
@@ -164,6 +165,7 @@ class NaverLandPlaywright:
         self.complexes = {}
         self.captured_articles = {}
         self.failed_regions = []
+        self.rate_limit_count = 0
         self.region_name = ""
         self.screenshot_dir = Path(screenshot_dir or SCREENSHOT_DIR)
         ensure_directory(self.screenshot_dir)
@@ -274,6 +276,13 @@ class NaverLandPlaywright:
             if not target_count:
                 return False
             if save_failed or saved_rows <= 0:
+                return False
+            if self.rate_limit_count > MAX_RATE_LIMIT_RESPONSES:
+                logging.error(
+                    "❌ Rate limit responses %s exceeded allowed %s",
+                    self.rate_limit_count,
+                    MAX_RATE_LIMIT_RESPONSES,
+                )
                 return False
             if failed_ratio > MAX_FAILED_REGION_RATIO:
                 logging.error(
@@ -497,6 +506,13 @@ class NaverLandPlaywright:
         async def handle_response(response):
             try:
                 url = response.url
+                if "front-api/v1" in url and response.status == 429:
+                    self.rate_limit_count += 1
+                    logging.error(
+                        "Naver front-api rate limited response: %s", url
+                    )
+                    return
+
                 if "front-api/v1" in url and response.status == 200:
                     # Filter out the detail APIs we just called manually to avoid noise
                     if "pyeongList" in url or "/complex?" in url:

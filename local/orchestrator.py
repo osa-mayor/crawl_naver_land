@@ -51,6 +51,7 @@ def default_summary(run_id: str, run_dir: Path) -> dict:
         "failed_shards": [],
         "db_count": 0,
         "merged_db_path": None,
+        "merged_db_quality": None,
         "excel_files": [],
         "google_drive_uploads": [],
         "discord_notification": None,
@@ -191,6 +192,7 @@ def build_base_env(config: LocalConfig, paths: dict[str, Path]) -> dict[str, str
                 config.crawl.network_ready_retry_delay_seconds
             ),
             "MAX_FAILED_REGION_RATIO": str(config.crawl.max_failed_region_ratio),
+            "MAX_RATE_LIMIT_RESPONSES": str(config.crawl.max_rate_limit_responses),
             "NAVER_REGION_JSON_PATH": str(config.region_json_path),
             "CRAWLER_SCREENSHOT_DIR": str(paths["screenshots"]),
         }
@@ -383,6 +385,62 @@ def run_merge(config: LocalConfig, paths: dict[str, Path]) -> Path:
     if result.returncode != 0 or not paths["merged_db"].exists():
         raise PipelineError("merge step failed")
     return paths["merged_db"]
+
+
+def validate_merged_db_quality(config: LocalConfig, merged_db: Path) -> dict:
+    with sqlite3.connect(merged_db) as conn:
+        complex_count = int(
+            conn.execute("select count(*) from complexes").fetchone()[0] or 0
+        )
+        price_count = int(conn.execute("select count(*) from prices").fetchone()[0] or 0)
+        priced_complex_count = int(
+            conn.execute("select count(distinct complex_no) from prices").fetchone()[0]
+            or 0
+        )
+        date_rows = conn.execute(
+            "select date, count(*) from prices group by date order by date"
+        ).fetchall()
+        region_rows = conn.execute(
+            """
+            select c.region_depth1, count(*)
+            from prices p
+            join complexes c on p.complex_no = c.complex_no
+            group by c.region_depth1
+            order by count(*) desc
+            """
+        ).fetchall()
+
+    priced_ratio = priced_complex_count / complex_count if complex_count else 0.0
+    metrics = {
+        "complex_count": complex_count,
+        "price_count": price_count,
+        "priced_complex_count": priced_complex_count,
+        "priced_complex_ratio": priced_ratio,
+        "date_rows": date_rows,
+        "region_rows": region_rows,
+        "min_total_price_records": config.crawl.min_total_price_records,
+        "min_priced_complex_ratio": config.crawl.min_priced_complex_ratio,
+    }
+
+    failures = []
+    if price_count < config.crawl.min_total_price_records:
+        failures.append(
+            f"price_count {price_count} < {config.crawl.min_total_price_records}"
+        )
+    if priced_ratio < config.crawl.min_priced_complex_ratio:
+        failures.append(
+            "priced_complex_ratio "
+            f"{priced_ratio:.3f} < {config.crawl.min_priced_complex_ratio:.3f}"
+        )
+
+    if failures:
+        raise PipelineError(
+            "merged DB quality gate failed: "
+            + "; ".join(failures)
+            + f"; metrics={metrics}"
+        )
+
+    return metrics
 
 
 def run_exports(config: LocalConfig, paths: dict[str, Path]) -> list[str]:
@@ -582,6 +640,10 @@ def run_pipeline(config: LocalConfig, run_id: str) -> int:
                 raise PipelineError("no shard databases were created")
 
             summary["merged_db_path"] = str(run_merge(config, paths))
+            summary["merged_db_quality"] = validate_merged_db_quality(
+                config, paths["merged_db"]
+            )
+            write_json(paths["summary"], summary)
             summary["excel_files"] = run_exports(config, paths)
 
             upload_targets = [paths["merged_db"]] + [

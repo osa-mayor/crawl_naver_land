@@ -73,6 +73,9 @@ class CrawlSettings:
     network_ready_retry_attempts: int
     network_ready_retry_delay_seconds: float
     max_failed_region_ratio: float
+    min_total_price_records: int
+    min_priced_complex_ratio: float
+    max_rate_limit_responses: int
 
 
 @dataclass(frozen=True)
@@ -164,6 +167,11 @@ def load_config(path: str | Path) -> LocalConfig:
             crawl_raw.get("network_ready_retry_delay_seconds", 5)
         ),
         max_failed_region_ratio=float(crawl_raw.get("max_failed_region_ratio", 0.25)),
+        min_total_price_records=int(crawl_raw.get("min_total_price_records", 70000)),
+        min_priced_complex_ratio=float(
+            crawl_raw.get("min_priced_complex_ratio", 0.55)
+        ),
+        max_rate_limit_responses=int(crawl_raw.get("max_rate_limit_responses", 20)),
     )
 
     export_jobs = [
