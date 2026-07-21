@@ -216,12 +216,7 @@ class NaverLandPlaywright:
 
     @staticmethod
     def _is_article_api_url(url):
-        if "front-api/v1" not in url:
-            return False
-        # These are metadata endpoints fetched separately; they are not article results.
-        if "pyeongList" in url or "/complex?" in url:
-            return False
-        return True
+        return "/front-api/v1/complex/article/list" in url
 
     def _extract_article_identity(self, response):
         url = response.url
@@ -299,6 +294,7 @@ class NaverLandPlaywright:
             {
                 "response_count": 0,
                 "status_counts": {},
+                "parsed_200_count": 0,
                 "item_count": 0,
                 "empty_200_count": 0,
                 "non_200_count": 0,
@@ -348,6 +344,9 @@ class NaverLandPlaywright:
             logging.warning("Article response JSON parse failed: %s", response.url)
             return True
 
+        for stats in stats_list:
+            stats["parsed_200_count"] += 1
+
         items = self._extract_article_items(data)
         if items:
             if cid not in self.captured_articles:
@@ -365,7 +364,7 @@ class NaverLandPlaywright:
         stats = self.article_response_stats.get((str(cid), str(trade_type)))
         if not stats:
             return False
-        return int(stats["status_counts"].get("200", 0)) > 0
+        return int(stats.get("parsed_200_count", 0)) > 0
 
     async def _visit_detail_page_and_wait_for_article(self, page, url, cid, trade_type):
         try:
