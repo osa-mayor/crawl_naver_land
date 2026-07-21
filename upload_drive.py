@@ -72,9 +72,15 @@ if __name__ == "__main__":
 
     service = authenticate_drive_oauth(token_content)
 
-    if service:
-        for f in args.files:
-            if os.path.exists(f):
-                upload_file(service, f, args.folder)
-            else:
-                print(f"⚠️ File not found: {f}")
+    if not service:
+        raise SystemExit(1)
+
+    all_ok = True
+    for f in args.files:
+        if os.path.exists(f):
+            all_ok = upload_file(service, f, args.folder) and all_ok
+        else:
+            print(f"⚠️ File not found: {f}")
+            all_ok = False
+
+    raise SystemExit(0 if all_ok else 1)
