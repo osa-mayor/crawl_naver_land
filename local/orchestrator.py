@@ -196,6 +196,9 @@ def build_base_env(config: LocalConfig, paths: dict[str, Path]) -> dict[str, str
             "ARTICLE_RESPONSE_TIMEOUT_MS": str(
                 config.crawl.article_response_timeout_ms
             ),
+            "MAX_ARTICLE_PAGES_PER_TRADE": str(
+                config.crawl.max_article_pages_per_trade
+            ),
             "MAX_ARTICLE_MISSING_COMPLEX_RATIO": str(
                 config.crawl.max_article_missing_complex_ratio
             ),

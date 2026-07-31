@@ -41,6 +41,7 @@ NETWORK_READY_RETRY_DELAY_SECONDS = float(
 MAX_FAILED_REGION_RATIO = float(os.getenv("MAX_FAILED_REGION_RATIO", 0.25))
 MAX_RATE_LIMIT_RESPONSES = int(os.getenv("MAX_RATE_LIMIT_RESPONSES", 20))
 ARTICLE_RESPONSE_TIMEOUT_MS = int(os.getenv("ARTICLE_RESPONSE_TIMEOUT_MS", 15000))
+MAX_ARTICLE_PAGES_PER_TRADE = int(os.getenv("MAX_ARTICLE_PAGES_PER_TRADE", 80))
 MAX_ARTICLE_MISSING_COMPLEX_RATIO = float(
     os.getenv("MAX_ARTICLE_MISSING_COMPLEX_RATIO", 0.50)
 )
@@ -175,6 +176,7 @@ class NaverLandPlaywright:
         self.complexes = {}
         self.captured_articles = {}
         self.article_response_stats = {}
+        self.article_pagination_states = {}
         self.seen_article_response_keys = set()
         self.article_attempts = set()
         self.article_missing_responses = []
@@ -218,10 +220,13 @@ class NaverLandPlaywright:
     def _is_article_api_url(url):
         return "/front-api/v1/complex/article/list" in url
 
-    def _extract_article_identity(self, response):
+    def _extract_article_identity(self, response, request_body=None):
         url = response.url
         query = self._article_query_values(url)
-        post = self._request_post_json(response.request)
+        post = request_body or {}
+        if not post:
+            request = getattr(response, "request", None)
+            post = self._request_post_json(request) if request is not None else {}
 
         cid = query.get("complexNumber") or post.get("complexNumber")
         trade_type = (
@@ -269,12 +274,16 @@ class NaverLandPlaywright:
             return value if isinstance(value, list) else []
         return []
 
-    def _article_response_key(self, response):
+    def _article_response_key(self, response, request_body=None):
         post_data = ""
-        try:
-            post_data = response.request.post_data or ""
-        except Exception:
-            pass
+        if request_body:
+            post_data = json.dumps(request_body, sort_keys=True, ensure_ascii=False)
+        else:
+            try:
+                request = getattr(response, "request", None)
+                post_data = request.post_data if request is not None else ""
+            except Exception:
+                pass
         return (response.status, response.url, post_data)
 
     @staticmethod
@@ -303,16 +312,54 @@ class NaverLandPlaywright:
             },
         )
 
-    async def _record_article_response(self, response):
+    def _article_pagination_key(self, cid, trade_type):
+        trade_keys = self._trade_type_keys(trade_type)
+        trade_key = trade_keys[0] if trade_keys else "UNKNOWN"
+        return (str(cid), str(trade_key))
+
+    def _extract_request_body(self, response, request_body=None):
+        body = request_body or {}
+        if not body:
+            request = getattr(response, "request", None)
+            body = self._request_post_json(request) if request is not None else {}
+        if body:
+            return dict(body)
+        return {}
+
+    def _update_article_pagination_state(self, response, data, request_body=None):
+        if not isinstance(data, dict):
+            return
+        result = data.get("result")
+        if not isinstance(result, dict):
+            return
+
+        cid, trade_type = self._extract_article_identity(response, request_body)
+        if not cid or not trade_type:
+            return
+
+        body = self._extract_request_body(response, request_body)
+        if not body:
+            return
+
+        key = self._article_pagination_key(cid, trade_type)
+        self.article_pagination_states[key] = {
+            "body": body,
+            "has_next_page": bool(result.get("hasNextPage")),
+            "last_info": result.get("lastInfo") or [],
+            "seed": result.get("seed"),
+            "total_count": result.get("totalCount"),
+        }
+
+    async def _record_article_response(self, response, request_body=None):
         if not self._is_article_api_url(response.url):
             return False
 
-        response_key = self._article_response_key(response)
+        response_key = self._article_response_key(response, request_body)
         if response_key in self.seen_article_response_keys:
             return True
         self.seen_article_response_keys.add(response_key)
 
-        cid, trade_type = self._extract_article_identity(response)
+        cid, trade_type = self._extract_article_identity(response, request_body)
         if not cid:
             return False
 
@@ -343,6 +390,8 @@ class NaverLandPlaywright:
                 stats["json_error_count"] += 1
             logging.warning("Article response JSON parse failed: %s", response.url)
             return True
+
+        self._update_article_pagination_state(response, data, request_body)
 
         for stats in stats_list:
             stats["parsed_200_count"] += 1
@@ -380,6 +429,64 @@ class NaverLandPlaywright:
         except Exception:
             return self._has_acceptable_article_response(cid, trade_type)
         return self._has_acceptable_article_response(cid, trade_type)
+
+    async def _fetch_remaining_article_pages(self, page, cid, trade_type):
+        key = self._article_pagination_key(cid, trade_type)
+        state = self.article_pagination_states.get(key)
+        if not state or not state.get("has_next_page"):
+            return 0
+
+        pages_fetched = 1
+        extra_pages = 0
+        while state.get("has_next_page") and pages_fetched < MAX_ARTICLE_PAGES_PER_TRADE:
+            body = dict(state.get("body") or {})
+            body["lastInfo"] = state.get("last_info") or []
+            if state.get("seed"):
+                body["seed"] = state["seed"]
+
+            try:
+                response = await page.request.post(
+                    "https://fin.land.naver.com/front-api/v1/complex/article/list",
+                    data=json.dumps(body),
+                    headers={"Content-Type": "application/json"},
+                )
+                await self._record_article_response(response, body)
+            except Exception as e:
+                logging.warning(
+                    "Article pagination failed %s (%s) after %s pages: %s",
+                    cid,
+                    trade_type,
+                    pages_fetched,
+                    e,
+                )
+                break
+
+            pages_fetched += 1
+            extra_pages += 1
+            new_state = self.article_pagination_states.get(key)
+            if not new_state or new_state.get("last_info") == state.get("last_info"):
+                break
+            state = new_state
+
+            await asyncio.sleep(random.uniform(0.15, 0.35))
+
+        if state.get("has_next_page") and pages_fetched >= MAX_ARTICLE_PAGES_PER_TRADE:
+            logging.warning(
+                "Article pagination capped %s (%s): fetched_pages=%s, total_count=%s",
+                cid,
+                trade_type,
+                pages_fetched,
+                state.get("total_count"),
+            )
+        elif extra_pages:
+            logging.info(
+                "Fetched %s extra article pages for %s (%s)",
+                extra_pages,
+                cid,
+                trade_type,
+            )
+
+        return extra_pages
 
     def _summarize_article_capture(self, filtered_cids):
         attempted_pairs = {(str(cid), t_type) for cid in filtered_cids for t_type in ["A1", "B1"]}
@@ -790,6 +897,9 @@ class NaverLandPlaywright:
                         ),
                         timeout=45.0,
                     ):
+                        await self._fetch_remaining_article_pages(
+                            current_page, cid, t_type
+                        )
                         self.article_attempts.add((str(cid), str(t_type)))
                         return current_page
 
