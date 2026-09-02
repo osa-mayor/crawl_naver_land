@@ -3273,7 +3273,7 @@
           },
           "신풍동": {
             "url": "https://fin.land.naver.com/regions?si=4100000000&gun=4111500000&eup=4111513000",
-            "has_complexes": false
+            "has_complexes": true
           },
           "영동": {
             "url": "https://fin.land.naver.com/regions?si=4100000000&gun=4111500000&eup=4111512400",
@@ -8359,7 +8359,7 @@
           },
           "사일동": {
             "url": "https://fin.land.naver.com/regions?si=2700000000&gun=2711000000&eup=2711011500",
-            "has_complexes": false
+            "has_complexes": true
           },
           "삼덕동1가": {
             "url": "https://fin.land.naver.com/regions?si=2700000000&gun=2711000000&eup=2711010500",
@@ -15821,7 +15821,7 @@
           },
           "가조면": {
             "url": "https://fin.land.naver.com/regions?si=4800000000&gun=4888000000&eup=4888040000",
-            "has_complexes": false
+            "has_complexes": true
           },
           "거창읍": {
             "url": "https://fin.land.naver.com/regions?si=4800000000&gun=4888000000&eup=4888025000",
@@ -21631,7 +21631,7 @@
           },
           "상예동": {
             "url": "https://fin.land.naver.com/regions?si=5000000000&gun=5013000000&eup=5013012000",
-            "has_complexes": false
+            "has_complexes": true
           },
           "상효동": {
             "url": "https://fin.land.naver.com/regions?si=5000000000&gun=5013000000&eup=5013010700",
