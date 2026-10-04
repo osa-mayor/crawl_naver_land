@@ -1,0 +1,34 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.osa-mayor.crawl-naver-land-recovery</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/bash</string>
+        <string>/Users/pyo/Projects/crawl_naver_land/scripts/run_local_recovery.sh</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>/Users/pyo/Projects/crawl_naver_land</string>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>StandardOutPath</key>
+    <string>/Users/pyo/Projects/crawl_naver_land/runtime/logs/launchd.recovery.stdout.log</string>
+
+    <key>StandardErrorPath</key>
+    <string>/Users/pyo/Projects/crawl_naver_land/runtime/logs/launchd.recovery.stderr.log</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PYTHONUNBUFFERED</key>
+        <string>1</string>
+        <key>PYTHONUTF8</key>
+        <string>1</string>
+    </dict>
+</dict>
+</plist>

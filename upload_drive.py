@@ -49,14 +49,20 @@ def find_existing_file(service, folder_id, file_name):
     return files[0] if files else None
 
 
-def upload_file(service, file_path, folder_id):
+def build_upload_name(file_path, date_prefix=None):
+    file_name = os.path.basename(file_path)
+    if not date_prefix:
+        from datetime import datetime, timezone, timedelta
+
+        KST = timezone(timedelta(hours=9))
+        date_prefix = datetime.now(KST).strftime("%Y-%m-%d")
+    return f"{date_prefix}_{file_name}"
+
+
+def upload_file(service, file_path, folder_id, date_prefix=None):
     """Upload or Update a file in the specific folder"""
     file_name = os.path.basename(file_path)
-    from datetime import datetime, timezone, timedelta
-
-    KST = timezone(timedelta(hours=9))
-    date_str = datetime.now(KST).strftime("%Y-%m-%d")
-    upload_name = f"{date_str}_{file_name}"
+    upload_name = build_upload_name(file_path, date_prefix=date_prefix)
 
     file_metadata = {"name": upload_name, "parents": [folder_id]}
 
@@ -105,6 +111,10 @@ if __name__ == "__main__":
     parser.add_argument("--folder", required=True, help="Target Google Drive Folder ID")
     parser.add_argument("--token", help="OAuth Token JSON Content")
     parser.add_argument("--token-file", help="Path to OAuth token JSON file")
+    parser.add_argument(
+        "--date-prefix",
+        help="Stable YYYY-MM-DD prefix, normally the crawl run start date",
+    )
 
     args = parser.parse_args()
 
@@ -124,7 +134,15 @@ if __name__ == "__main__":
     all_ok = True
     for f in args.files:
         if os.path.exists(f):
-            all_ok = upload_file(service, f, args.folder) and all_ok
+            all_ok = (
+                upload_file(
+                    service,
+                    f,
+                    args.folder,
+                    date_prefix=args.date_prefix,
+                )
+                and all_ok
+            )
         else:
             print(f"⚠️ File not found: {f}")
             all_ok = False

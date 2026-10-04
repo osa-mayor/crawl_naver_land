@@ -1,6 +1,6 @@
 class NaverLandSelectors:
     # Region & Navigation
-    MORE_BUTTON = "button[class*='button-more'], button:has-text('더보기')"
+    MORE_BUTTON = "a[class*='button-more'], button[class*='button-more'], a:has-text('더보기'), button:has-text('더보기')"
     
     # Complex List Item (CSS Module robustness)
     COMPLEX_ITEM = "li[class*='ComplexItem']"

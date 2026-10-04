@@ -15,4 +15,4 @@ fi
 export PYTHONUTF8=1
 export PYTHONUNBUFFERED=1
 
-exec /usr/bin/caffeinate -dimsu "$PYTHON_BIN" -m local.orchestrator --config "$PROJECT_ROOT/local/config.json"
+exec /usr/bin/caffeinate -dimsu "$PYTHON_BIN" -m local.orchestrator --config "$PROJECT_ROOT/local/config.json" "$@"

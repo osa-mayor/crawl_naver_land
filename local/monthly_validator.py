@@ -131,9 +131,22 @@ def preflight(config: LocalConfig, paths: dict[str, Path]) -> None:
             f"unexpected branch: {branch} (expected {config.validator.expected_branch})"
         )
 
-    status = git_stdout(config.validator.repo_root, ["status", "--porcelain"])
-    if status:
-        raise PipelineError("monthly validator requires a clean git worktree")
+    rel_path = str(
+        config.validator.region_file.relative_to(config.validator.repo_root)
+    )
+    region_status = git_stdout(
+        config.validator.repo_root,
+        ["status", "--porcelain", "--", rel_path],
+    )
+    if region_status:
+        raise PipelineError("monthly validator region file must be clean")
+
+    staged_paths = git_stdout(
+        config.validator.repo_root,
+        ["diff", "--cached", "--name-only"],
+    )
+    if staged_paths:
+        raise PipelineError("monthly validator git index must be clean")
 
     remote = git_stdout(config.validator.repo_root, ["remote"])
     remotes = {line.strip() for line in remote.splitlines() if line.strip()}

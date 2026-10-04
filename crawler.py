@@ -11,6 +11,7 @@ import sqlite3
 import argparse
 import sys
 import socket
+import hashlib
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 from land_selectors import NaverLandSelectors
@@ -73,6 +74,20 @@ def sanitize_filename(value):
     return sanitized or "unnamed"
 
 
+def normalize_business_region(sido, gungu, full_path):
+    """Keep the project's metro/province split for the site's merged label."""
+    if sido != "전남광주시":
+        return sido
+    root = str(full_path or "").split()
+    if root and root[0] in {"광주시", "전라남도"}:
+        return root[0]
+    if gungu in {"광산구", "남구", "동구", "북구", "서구"}:
+        return "광주시"
+    if gungu and gungu.endswith(("시", "군")):
+        return "전라남도"
+    raise ValueError(f"merged region cannot be classified: {gungu}")
+
+
 def configure_logging(log_path):
     ensure_parent_directory(log_path)
 
@@ -123,7 +138,7 @@ async def wait_for_network_ready(
     delay_seconds: float = NETWORK_READY_RETRY_DELAY_SECONDS,
 ) -> bool:
     for attempt in range(1, attempts + 1):
-        if can_connect(host):
+        if await asyncio.to_thread(can_connect, host):
             return True
         logging.warning(
             "Network check failed for %s (%s/%s); waiting %.1fs",
@@ -136,13 +151,45 @@ async def wait_for_network_ready(
     return False
 
 
-# User-Agent List for Stealth
-USER_AGENTS = [
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-]
-
-
 class DataProcessor:
+    @staticmethod
+    def positive_price(value):
+        if isinstance(value, bool) or value is None:
+            return None
+        try:
+            if isinstance(value, str):
+                value = value.replace(",", "").strip()
+            price = int(float(value))
+        except (TypeError, ValueError, OverflowError):
+            return None
+        return price if price > 0 else None
+
+    @staticmethod
+    def floor_category(article) -> str:
+        floor_info = article.get("floorDetailInfo")
+        if not floor_info:
+            floor_info = (article.get("articleDetail") or {}).get("floorDetailInfo")
+
+        floor_value = ""
+        if isinstance(floor_info, dict):
+            floor_value = floor_info.get("targetFloor", "")
+        elif floor_info:
+            floor_value = str(floor_info).split("/")[0]
+
+        if not floor_value:
+            floor_value = article.get("floorInfo", "")
+        if not floor_value:
+            floor_value = (article.get("articleDetail") or {}).get("floorInfo", "")
+
+        floor_value = str(floor_value).split("/")[0].strip()
+        if floor_value in {"1", "2", "3", "저"}:
+            return "low"
+        if floor_value.isdigit():
+            return "normal" if int(floor_value) > 3 else "low"
+        if floor_value in {"중", "고"}:
+            return "normal"
+        return "unknown"
+
     @staticmethod
     def is_low_floor(floor_info: str) -> bool:
         if not floor_info:
@@ -178,18 +225,31 @@ class NaverLandPlaywright:
         self.article_response_stats = {}
         self.article_pagination_states = {}
         self.seen_article_response_keys = set()
+        self.article_response_tasks = {}
+        self.article_seen_ids = {}
+        self.region_results = []
+        self.list_inventories = {}
         self.article_attempts = set()
         self.article_missing_responses = []
         self.failed_regions = []
+        self.blocking_error = None
         self.rate_limit_count = 0
         self.region_name = ""
         self.screenshot_dir = Path(screenshot_dir or SCREENSHOT_DIR)
         ensure_directory(self.screenshot_dir)
 
+    async def _wait_buffer(self, minimum, maximum):
+        """Historical per-page buffer; independent pages may wait concurrently."""
+        if self.blocking_error or self.rate_limit_count:
+            raise ArticleResponseUnavailable(self.blocking_error or 'paused after rate limiting')
+        await asyncio.sleep(random.uniform(minimum, maximum))
+        if self.blocking_error or self.rate_limit_count:
+            raise ArticleResponseUnavailable(self.blocking_error or 'paused after rate limiting')
+
     def get_context_options(self):
-        ua = random.choice(USER_AGENTS)
         return {
-            "user_agent": ua,
+            # Preserve the browser identity used by the previously working crawler.
+            "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
             "viewport": {"width": 1280, "height": 720},
             "is_mobile": False,
             "has_touch": False,
@@ -353,139 +413,151 @@ class NaverLandPlaywright:
     async def _record_article_response(self, response, request_body=None):
         if not self._is_article_api_url(response.url):
             return False
-
-        response_key = self._article_response_key(response, request_body)
-        if response_key in self.seen_article_response_keys:
+        key = self._article_response_key(response, request_body)
+        if key in self.seen_article_response_keys:
             return True
-        self.seen_article_response_keys.add(response_key)
+        # Event listener and expect_response must join the same parsing task.
+        task = self.article_response_tasks.get(key)
+        if task is None:
+            task = asyncio.create_task(self._parse_article_response(response, request_body))
+            self.article_response_tasks[key] = task
+        try:
+            valid = await asyncio.shield(task)
+            if valid:
+                self.seen_article_response_keys.add(key)
+            return valid
+        finally:
+            if task.done() and self.article_response_tasks.get(key) is task:
+                self.article_response_tasks.pop(key, None)
 
+    async def _parse_article_response(self, response, request_body=None):
         cid, trade_type = self._extract_article_identity(response, request_body)
-        if not cid:
+        if not cid or not trade_type:
             return False
-
         status = int(response.status)
-        stats_list = [
-            self._article_stats_for(cid, key) for key in self._trade_type_keys(trade_type)
-        ]
+        trade_keys = self._trade_type_keys(trade_type)
+        stats_list = [self._article_stats_for(cid, key) for key in trade_keys]
         for stats in stats_list:
-            stats["response_count"] += 1
-            stats["status_counts"][str(status)] = (
-                stats["status_counts"].get(str(status), 0) + 1
-            )
-            stats["last_url"] = response.url
-
+            stats['response_count'] += 1
+            stats['status_counts'][str(status)] = stats['status_counts'].get(str(status), 0) + 1
+            stats['last_url'] = response.url
         if status == 429:
             self.rate_limit_count += 1
-            logging.error("Naver front-api rate limited response: %s", response.url)
-
+            logging.error('Naver rate limited article request: %s', response.url)
         if status != 200:
             for stats in stats_list:
-                stats["non_200_count"] += 1
-            return True
-
+                stats['non_200_count'] += 1
+            return False
         try:
             data = await response.json()
-        except Exception:
+            result = data.get('result') if isinstance(data, dict) else None
+            if (not isinstance(data, dict) or data.get('isSuccess') is False
+                    or not isinstance(result, dict) or not isinstance(result.get('list'), list)
+                    or not isinstance(result.get('hasNextPage'), bool)
+                    or isinstance(result.get('totalCount'), bool)
+                    or not isinstance(result.get('totalCount'), int)
+                    or result['totalCount'] < 0):
+                raise ValueError('unrecognized article response schema')
+            items = result['list']
+            normalized = []
+            for item in items:
+                if not isinstance(item, dict):
+                    raise ValueError('invalid article item')
+                representative = item.get('representativeArticleInfo') or item
+                if not isinstance(representative, dict) or not representative.get('articleNumber'):
+                    raise ValueError('article identity missing')
+                item_trade = representative.get('tradeType')
+                if item_trade not in trade_keys:
+                    raise ValueError('article trade filter mismatch')
+                item_cid = representative.get('complexNumber')
+                if item_cid is not None and str(item_cid) != cid:
+                    raise ValueError('article complex filter mismatch')
+                normalized.append((item, str(representative['articleNumber']), item_trade))
+            if result['hasNextPage'] and (not items or not result.get('lastInfo')):
+                raise ValueError('next page missing items/cursor')
+        except Exception as exc:
             for stats in stats_list:
-                stats["json_error_count"] += 1
-            logging.warning("Article response JSON parse failed: %s", response.url)
-            return True
-
+                stats['json_error_count'] += 1
+            logging.warning('Article response parse/schema failed: %s (%s)', response.url, exc)
+            return False
         self._update_article_pagination_state(response, data, request_body)
-
         for stats in stats_list:
-            stats["parsed_200_count"] += 1
-
-        items = self._extract_article_items(data)
-        if items:
-            if cid not in self.captured_articles:
-                self.captured_articles[cid] = []
-            self.captured_articles[cid].extend(items)
-            for stats in stats_list:
-                stats["item_count"] += len(items)
-        else:
-            for stats in stats_list:
-                stats["empty_200_count"] += 1
-
+            stats['parsed_200_count'] += 1
+            if not items:
+                stats['empty_200_count'] += 1
+        for item, article_id, item_trade in normalized:
+            seen = self.article_seen_ids.setdefault((cid, item_trade), set())
+            if article_id not in seen:
+                seen.add(article_id)
+                self.captured_articles.setdefault(cid, []).append(item)
+                self._article_stats_for(cid, item_trade)['item_count'] += 1
         return True
 
     def _has_acceptable_article_response(self, cid, trade_type):
         stats = self.article_response_stats.get((str(cid), str(trade_type)))
-        if not stats:
+        return bool(stats and stats.get('parsed_200_count', 0) > 0)
+
+    def _has_complete_article_response(self, cid, trade_type):
+        key = (str(cid), str(trade_type))
+        state = self.article_pagination_states.get(key)
+        if not state or state.get('has_next_page'):
             return False
-        return int(stats.get("parsed_200_count", 0)) > 0
+        return (self._has_acceptable_article_response(cid, trade_type)
+                and len(self.article_seen_ids.get(key, set())) == state.get('total_count'))
 
     async def _visit_detail_page_and_wait_for_article(self, page, url, cid, trade_type):
         try:
             async with page.expect_response(
-                lambda response: self._is_expected_article_response(
-                    response, cid, trade_type
-                ),
+                lambda response: self._is_expected_article_response(response, cid, trade_type),
                 timeout=ARTICLE_RESPONSE_TIMEOUT_MS,
             ) as response_info:
                 await self._visit_detail_page(page, url)
-            response = await response_info.value
-            await self._record_article_response(response)
-        except Exception:
+            return await self._record_article_response(await response_info.value)
+        except Exception as exc:
+            logging.warning('Article navigation/capture %s %s: %s', cid, trade_type, exc)
             return self._has_acceptable_article_response(cid, trade_type)
-        return self._has_acceptable_article_response(cid, trade_type)
 
     async def _fetch_remaining_article_pages(self, page, cid, trade_type):
         key = self._article_pagination_key(cid, trade_type)
         state = self.article_pagination_states.get(key)
-        if not state or not state.get("has_next_page"):
-            return 0
-
-        pages_fetched = 1
+        if not state:
+            raise ArticleResponseUnavailable(f'pagination state missing: {cid} {trade_type}')
         extra_pages = 0
-        while state.get("has_next_page") and pages_fetched < MAX_ARTICLE_PAGES_PER_TRADE:
-            body = dict(state.get("body") or {})
-            body["lastInfo"] = state.get("last_info") or []
-            if state.get("seed"):
-                body["seed"] = state["seed"]
-
+        while state.get('has_next_page'):
+            if self.rate_limit_count:
+                raise ArticleResponseUnavailable('pagination paused after rate limiting; retry later')
+            if extra_pages + 1 >= MAX_ARTICLE_PAGES_PER_TRADE:
+                raise ArticleResponseUnavailable(f'pagination cap reached: {cid} {trade_type}')
+            body = dict(state['body'])
+            body['lastInfo'] = state['last_info']
+            if state.get('seed'):
+                body['seed'] = state['seed']
+            response = None
             try:
                 response = await page.request.post(
-                    "https://fin.land.naver.com/front-api/v1/complex/article/list",
-                    data=json.dumps(body),
-                    headers={"Content-Type": "application/json"},
+                    'https://fin.land.naver.com/front-api/v1/complex/article/list',
+                    data=json.dumps(body), headers={'Content-Type': 'application/json'},
+                    timeout=ARTICLE_RESPONSE_TIMEOUT_MS,
                 )
-                await self._record_article_response(response, body)
-            except Exception as e:
-                logging.warning(
-                    "Article pagination failed %s (%s) after %s pages: %s",
-                    cid,
-                    trade_type,
-                    pages_fetched,
-                    e,
-                )
-                break
-
-            pages_fetched += 1
+                if not await self._record_article_response(response, body):
+                    raise ArticleResponseUnavailable(f'page response failed: {cid} {trade_type} HTTP{response.status}')
+            except ArticleResponseUnavailable:
+                raise
+            except Exception as exc:
+                raise ArticleResponseUnavailable(f'pagination request failed: {cid} {trade_type}: {exc}') from exc
+            finally:
+                if response is not None:
+                    await response.dispose()
             extra_pages += 1
             new_state = self.article_pagination_states.get(key)
-            if not new_state or new_state.get("last_info") == state.get("last_info"):
-                break
+            if not new_state or (new_state['has_next_page'] and new_state['last_info'] == state['last_info']):
+                raise ArticleResponseUnavailable(f'pagination cursor stalled: {cid} {trade_type}')
             state = new_state
-
-            await asyncio.sleep(random.uniform(0.15, 0.35))
-
-        if state.get("has_next_page") and pages_fetched >= MAX_ARTICLE_PAGES_PER_TRADE:
-            logging.warning(
-                "Article pagination capped %s (%s): fetched_pages=%s, total_count=%s",
-                cid,
-                trade_type,
-                pages_fetched,
-                state.get("total_count"),
-            )
-        elif extra_pages:
-            logging.info(
-                "Fetched %s extra article pages for %s (%s)",
-                extra_pages,
-                cid,
-                trade_type,
-            )
-
+            await self._wait_buffer(0.15, 0.35)
+        if not self._has_complete_article_response(cid, trade_type):
+            raise ArticleResponseUnavailable(f'article total mismatch: {cid} {trade_type}')
+        logging.info('Article collection COMPLETE %s (%s): unique=%s extra_pages=%s',
+                     cid, trade_type, len(self.article_seen_ids.get(key, set())), extra_pages)
         return extra_pages
 
     def _summarize_article_capture(self, filtered_cids):
@@ -527,7 +599,10 @@ class NaverLandPlaywright:
             and (str(cid), "B1") in empty_pairs
         }
 
+        complete_pairs = {key for key in attempted_pairs if self._has_complete_article_response(*key)}
         return {
+            "complete_pairs": len(complete_pairs),
+            "incomplete_pairs": len(attempted_pairs - complete_pairs),
             "target_complexes": len(filtered_cids),
             "attempted_pairs": len(attempted_pairs),
             "observed_pairs": len(observed_pairs),
@@ -544,333 +619,239 @@ class NaverLandPlaywright:
         }
 
     async def run_test(self, target_urls, headless=True):
-        """Main execution with Parallelism"""
+        """A run is complete only when every routed target and DB commit succeeds."""
+        self.region_results = []
+        save_ok = False
         async with async_playwright() as p:
-            browser = await p.chromium.launch(
-                headless=headless,
-                args=[
-                    "--disable-blink-features=AutomationControlled",
-                    "--no-sandbox",
-                    "--disable-setuid-sandbox",
-                ],
-            )
-
-            # Semaphore for limiting concurrency
+            browser = await p.chromium.launch(headless=headless, args=['--disable-blink-features=AutomationControlled'])
             sem = asyncio.Semaphore(MAX_CONCURRENT_PAGES)
-
             async def worker(item):
-                dong_name, url = item
+                name, url = item
+                result = {'name':name, 'url':url, 'status':'failed'}
+                context = None
                 async with sem:
-                    # New Context per URL (Isolated cookies, Random UA)
-                    context = await browser.new_context(**self.get_context_options())
-
-                    # Stealth scripts
-                    page = await context.new_page()
-                    await page.add_init_script("""
-                        Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
-                    """)
-
                     try:
-                        logging.info(f"🚀 Processing: {dong_name} ({url})")
-                        await asyncio.sleep(
-                            random.uniform(0.5, 1.5)
-                        )  # Random start delay
-                        ok = await self.process_region_tab(page, url, dong_name)
-                        if not ok:
-                            self.failed_regions.append(
-                                {"name": dong_name, "url": url, "reason": "crawl_failed"}
-                            )
-                    except Exception as e:
-                        logging.error(f"❌ Failed processing {url}: {e}")
-                        self.failed_regions.append(
-                            {"name": dong_name, "url": url, "reason": str(e)}
-                        )
+                        if self.blocking_error or self.rate_limit_count:
+                            raise ArticleResponseUnavailable(self.blocking_error or 'paused after rate limiting; retry later')
+                        context = await browser.new_context(**self.get_context_options())
+                        page = await context.new_page()
+                        await page.add_init_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined});")
+                        logging.info('Processing: %s (%s)', name, url)
+                        await self._wait_buffer(0.5, 1.5)
+                        ok = await self.process_region_tab(page, url, name)
+                        inventory = self.list_inventories.get(url, {})
+                        result.update(inventory)
+                        if ok:
+                            result['status'] = 'complete' if inventory.get('apartment_ids') else 'empty'
+                        else:
+                            result['error'] = 'region collection incomplete'
+                    except Exception as exc:
+                        result['error'] = str(exc)
+                        logging.error('Region failed %s: %s', name, exc)
                     finally:
-                        await context.close()
-
-            tasks = [worker(item) for item in target_urls]
-            if not tasks:
-                logging.warning("No URLs to crawl.")
-            else:
-                await asyncio.gather(*tasks)
-
-            # --- SAVE PHASE ---
-            logging.info("💾 Processing and Saving Collected Data...")
-
-            # 1) Save complexes metadata even if there are NO articles
+                        if context is not None:
+                            await context.close()
+                        self.region_results.append(result)
+                        if result['status'] == 'failed':
+                            self.failed_regions.append(result)
             try:
+                await asyncio.gather(*(worker(item) for item in target_urls))
                 save_complexes_metadata_only(self.complexes)
-            except Exception as e:
-                logging.error(f"❌ Failed to save complexes metadata: {e}")
-
-            # 2) Save prices only if we have articles
-            saved_rows = 0
-            save_failed = False
-            try:
                 df = self.process_data()
                 if not df.empty:
-                    save_to_db(df)
-                    saved_rows = len(df)
-                    logging.info(f"✅ Saved {saved_rows} rows to DB.")
-                else:
-                    logging.warning("⚠️ No data rows generated (no article/prices).")
-            except Exception as e:
-                logging.error(f"❌ Failed to save DB: {e}")
-                save_failed = True
-
-            await browser.close()
-
-            target_count = len(target_urls)
-            failed_count = len(self.failed_regions)
-            failed_ratio = failed_count / target_count if target_count else 0
-
-            if failed_count:
-                sample = self.failed_regions[:10]
-                logging.error(
-                    "❌ Failed regions: %s/%s (%.1f%%), sample=%s",
-                    failed_count,
-                    target_count,
-                    failed_ratio * 100,
-                    sample,
-                )
-
-            if not target_count:
-                return False
-            if save_failed or saved_rows <= 0:
-                return False
-            if self.rate_limit_count > MAX_RATE_LIMIT_RESPONSES:
-                logging.error(
-                    "❌ Rate limit responses %s exceeded allowed %s",
-                    self.rate_limit_count,
-                    MAX_RATE_LIMIT_RESPONSES,
-                )
-                return False
-            if failed_ratio > MAX_FAILED_REGION_RATIO:
-                logging.error(
-                    "❌ Failed region ratio %.1f%% exceeds allowed %.1f%%",
-                    failed_ratio * 100,
-                    MAX_FAILED_REGION_RATIO * 100,
-                )
-                return False
-
-            return True
+                    saved_rows = save_to_db(df)
+                    if saved_rows is not None and saved_rows != len(df):
+                        raise RuntimeError('committed price row count mismatch')
+                    logging.info('Committed %s price rows', len(df))
+                save_ok = True
+            except Exception as exc:
+                logging.exception('Run/DB save failed: %s', exc)
+            finally:
+                await browser.close()
+        complete = bool(target_urls) and save_ok and len(self.region_results) == len(target_urls) and not self.failed_regions
+        result = {
+            'schema_version':1, 'status':'complete' if complete else 'failed',
+            'mode':'backfill' if hasattr(self,'skip_complex_ids') else 'full',
+            'region_json_sha256':hashlib.sha256(Path(REGION_JSON_PATH).read_bytes()).hexdigest(),
+            'expected_target_count':len(target_urls), 'failed_target_count':len(self.failed_regions),
+            'targets':sorted(self.region_results, key=lambda row:(row['name'],row['url'])),
+            'saved':save_ok,
+            'rate_limit_count':self.rate_limit_count,
+            'blocking_error':self.blocking_error,
+        }
+        result_path = Path(DB_PATH + '.result.json')
+        ensure_parent_directory(result_path)
+        temp = result_path.with_suffix(result_path.suffix + '.tmp')
+        temp.write_text(json.dumps(result,ensure_ascii=False,indent=2),encoding='utf-8')
+        os.replace(temp,result_path)
+        return complete
 
     async def process_region_tab(self, page, target_url, dong_name):
-        """Retry a region when transient network issues leave the page empty."""
         for attempt in range(1, NAVIGATION_RETRY_ATTEMPTS + 1):
-            ok = await self._process_region_tab_once(page, target_url, dong_name)
-            if ok:
-                return True
-
+            try:
+                if page.is_closed():
+                    page = await page.context.new_page()
+                    await page.add_init_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined});")
+                if await self._process_region_tab_once(page, target_url, dong_name):
+                    return True
+            except Exception as exc:
+                logging.warning('Region incomplete %s attempt %s/%s: %s', dong_name, attempt, NAVIGATION_RETRY_ATTEMPTS, exc)
+            if self.blocking_error or self.rate_limit_count:
+                # Respect throttling: stop requests, retain an incomplete result for a later retry.
+                return False
             if attempt < NAVIGATION_RETRY_ATTEMPTS:
-                logging.warning(
-                    "Retrying region %s after failed/empty result attempt %s/%s",
-                    target_url,
-                    attempt,
-                    NAVIGATION_RETRY_ATTEMPTS,
-                )
-                await wait_for_network_ready()
-                await page.wait_for_timeout(5000 * attempt)
-
+                await asyncio.sleep(5 * attempt)
         return False
 
-    async def _process_region_tab_once(self, page, target_url, dong_name):
-        """Logic for processing a single region tab"""
-        for attempt in range(1, NAVIGATION_RETRY_ATTEMPTS + 1):
-            try:
-                # 1. Go to Region
-                await page.goto(
-                    target_url, wait_until="domcontentloaded", timeout=60000
-                )
-
-                # Robust Wait: Wait for API response that loads the list
-                try:
-                    async with page.expect_response(
-                        lambda response: (
-                            "complex" in response.url and response.status == 200
-                        ),
-                        timeout=10000,
-                    ):
-                        pass
-                except:
-                    pass  # Proceed
-
-                await page.wait_for_timeout(random.uniform(2000, 3000))
-                break
-            except Exception as e:
-                logging.warning(
-                    "Region navigation failed %s attempt %s/%s: %s",
-                    target_url,
-                    attempt,
-                    NAVIGATION_RETRY_ATTEMPTS,
-                    e,
-                )
-                if attempt >= NAVIGATION_RETRY_ATTEMPTS or not is_transient_navigation_error(e):
-                    logging.error(f"Failed to load region page {target_url}: {e}")
-                    return False
-
-                network_ready = await wait_for_network_ready()
-                if not network_ready:
-                    logging.warning(
-                        "Network did not pass readiness check before retrying %s",
-                        target_url,
-                    )
-                await page.wait_for_timeout(5000 * attempt)
-
-        # 2. Load All Complexes (Pagination)
-        logging.info("Loading full list...")
-        while True:
-            try:
-                more_btn = page.locator(NaverLandSelectors.MORE_BUTTON)
-                if await more_btn.is_visible(timeout=2000):
-                    await more_btn.click()
-                    await page.wait_for_timeout(random.uniform(300, 700))
-                else:
-                    break
-            except:
-                break
-
-        # 3. Extract Complexes
+    async def _load_region_complexes(self, page, target_url):
+        """Observe throttling before navigation, including region/auth API responses."""
+        if self.blocking_error or self.rate_limit_count:
+            raise ArticleResponseUnavailable(self.blocking_error or "paused after HTTP 429")
+        blocked = asyncio.Event()
+        def observe(response):
+            host = urlparse(response.url).hostname or ''
+            if (host == 'naver.com' or host.endswith('.naver.com')) and response.status == 429:
+                self.rate_limit_count += 1
+                self.blocking_error = f'HTTP 429: {response.url}; pause before retry'
+                blocked.set()
+        page.on('response', observe)
+        loader = asyncio.create_task(self._load_region_inventory(page, target_url))
+        waiter = asyncio.create_task(blocked.wait())
         try:
-            await page.wait_for_selector(
-                NaverLandSelectors.COMPLEX_ITEM, state="attached", timeout=5000
-            )
-        except:
-            logging.warning("Timeout waiting for complex list (or empty).")
+            done, _ = await asyncio.wait((loader, waiter), return_when=asyncio.FIRST_COMPLETED)
+            if blocked.is_set():
+                raise ArticleResponseUnavailable(self.blocking_error)
+            return await loader
+        finally:
+            page.remove_listener('response', observe)
+            for task in (loader, waiter):
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(loader, waiter, return_exceptions=True)
 
-        complex_items = await page.query_selector_all(NaverLandSelectors.COMPLEX_ITEM)
-        logging.info(f"🔍 Raw Complex Items Found: {len(complex_items) // 6}")
+    async def _load_region_inventory(self, page, target_url):
+        """Load the full unfiltered inventory, proving count before filtering."""
+        response = await page.goto(target_url, wait_until='domcontentloaded', timeout=60000)
+        expected_url = urlparse(target_url)
+        actual_url = urlparse(page.url)
+        if (actual_url.netloc, actual_url.path, parse_qs(actual_url.query)) != (expected_url.netloc, expected_url.path, parse_qs(expected_url.query)):
+            self.blocking_error = f'region redirect: {target_url} -> {page.url}'
+            raise ArticleResponseUnavailable(self.blocking_error)
+        if response is not None and response.status >= 400:
+            self.blocking_error = f'region HTTP {response.status}: {page.url}'
+            raise ArticleResponseUnavailable(self.blocking_error)
+        # A total label can render before the initial cards. Wait for both,
+        # rather than assuming a fixed delay means the list has loaded.
+        await page.wait_for_function(r"""() => {
+            const match = document.body.innerText.match(/총\s*([\d,]+)\s*개\s*단지/);
+            if (!match) return false;
+            if (Number(match[1].replaceAll(',', '')) === 0) return true;
+            return [...document.querySelectorAll('a[href^="/complexes/"]')].some(a =>
+                /^\/complexes\/\d+$/.test(a.getAttribute('href') || '') &&
+                a.closest('li')?.querySelector('strong[class*="name"]')?.textContent?.trim());
+        }""", timeout=20000)
+        text = await page.locator('body').inner_text()
+        match = re.search(r'총\s*([\d,]+)\s*개\s*단지', text)
+        if not match:
+            raise ArticleResponseUnavailable('region total is missing')
+        expected = int(match.group(1).replace(',', ''))
+        inventory = {}
+        for _ in range(1000):
+            if self.blocking_error or self.rate_limit_count:
+                raise ArticleResponseUnavailable(self.blocking_error or "paused after HTTP 429")
+            rows = await page.evaluate("""() => [...document.querySelectorAll('a[href^="/complexes/"]')]
+              .filter(a => /^\/complexes\/\d+$/.test(a.getAttribute('href') || ''))
+              .map(a => { const li=a.closest('li'); const name=li?.querySelector('strong[class*="name"]');
+                 const badge=li?.querySelector('span[class*="TitleBadge"], span[class*="badge"]');
+                 return {id:a.getAttribute('href').split('/').pop(),name:name?.textContent?.trim(),
+                   badge:badge?.textContent?.trim(),text:li?.innerText || ''}; })""")
+            for row in rows:
+                if not row['name'] or not row['text']:
+                    raise ArticleResponseUnavailable('complex card could not be parsed')
+                row['badge'] = row.get('badge') or row['text'].split('\n')[0].strip()
+                row['badge'] = re.sub(r'\s+', '', row['badge'])
+                if row['badge'] not in {'아파트', '오피스텔', '분양권', '아파트분양권', '오피스텔분양권'}:
+                    raise ArticleResponseUnavailable(f"complex category missing or unknown: {row['badge']!r}")
+                inventory[row['id']] = row
+            if len(inventory) == expected:
+                return list(inventory.values())
+            if len(inventory) > expected:
+                raise ArticleResponseUnavailable('region total changed during collection')
+            more = page.locator(NaverLandSelectors.MORE_BUTTON)
+            await more.wait_for(state='visible', timeout=10000)
+            previous_ids = list(inventory)
+            await more.click(timeout=10000)
+            # Wait for a NEW identity, not a transient spinner or arbitrary delay.
+            await page.wait_for_function("""ids => [...document.querySelectorAll('a[href^="/complexes/"]')]
+                .some(a => /^\/complexes\/\d+$/.test(a.getAttribute('href') || '') &&
+                 !ids.includes(a.getAttribute('href').split('/').pop()))""", arg=previous_ids, timeout=15000)
+        raise ArticleResponseUnavailable('region pagination safety cap exceeded')
 
+    async def _get_required_json(self, page, url):
+        if self.blocking_error or self.rate_limit_count:
+            raise ArticleResponseUnavailable('paused after rate limiting; retry later')
+        response = await page.request.get(url, timeout=ARTICLE_RESPONSE_TIMEOUT_MS)
+        try:
+            if response.status == 429:
+                self.rate_limit_count += 1
+            if response.status != 200:
+                raise ArticleResponseUnavailable(f'metadata HTTP {response.status}: {url}')
+            data = await response.json()
+            if not isinstance(data, dict) or data.get('isSuccess') is False or 'result' not in data:
+                raise ArticleResponseUnavailable(f'metadata schema invalid: {url}')
+            return data['result']
+        finally:
+            await response.dispose()
+
+    async def _process_region_tab_once(self, page, target_url, dong_name):
+        rows = await self._load_region_complexes(page, target_url)
+        self.list_inventories[target_url] = {'total':len(rows), 'ids':[r['id'] for r in rows]}
         filtered_cids = []
-
-        for item in complex_items:
-            try:
-                # Link & CID
-                link_el = await item.query_selector(NaverLandSelectors.COMPLEX_LINK)
-                if not link_el:
-                    continue
-                href = await link_el.get_attribute("href")
-                match = re.search(r"/complexes/(\d+)", href)
-                if not match:
-                    continue
-                cid = match.group(1)
-
-                # Name
-                name_el = await item.query_selector(NaverLandSelectors.COMPLEX_NAME)
-                name = await name_el.inner_text() if name_el else f"Complex_{cid}"
-
-                # Filters (Badge)
-                is_apt = False
-                badge_el = await item.query_selector(NaverLandSelectors.COMPLEX_BADGE)
-                if badge_el:
-                    badge_text = await badge_el.inner_text()
-                    if (
-                        "아파트" in badge_text or "분양권" in badge_text
-                    ) and "오피스텔" not in badge_text:
-                        is_apt = True
-
-                if not is_apt:
-                    continue
-
-                # Households
-                households = 0
-                info_items = await item.query_selector_all(
-                    NaverLandSelectors.COMPLEX_INFO
-                )
-                for info in info_items:
-                    text = await info.inner_text()
-                    if "세대" in text:
-                        h_match = re.search(r"(\d[\d,]*)\s*세대", text)
-                        if h_match:
-                            households = int(h_match.group(1).replace(",", ""))
-                            break
-
-                if households < MIN_HOUSEHOLDS:
-                    logging.info(
-                        f"Skipping {name}: Households {households} < {MIN_HOUSEHOLDS}"
-                    )
-                    continue
-
-                # ✅ IMPORTANT: store dong_name (now full path 가능)
-                self.complexes[cid] = {
-                    "name": name,
-                    "households": households,
-                    "_dong_name": dong_name,
-                }
-                filtered_cids.append(cid)
-            except Exception:
+        for row in rows:
+            badge = row['badge']
+            if not (('아파트' in badge or '분양권' in badge) and '오피스텔' not in badge):
                 continue
-
-        logging.info(f"Target Count in Region: {len(filtered_cids)}")
+            match = re.search(r'(\d[\d,]*)\s*세대', row['text'])
+            if not match:
+                raise ArticleResponseUnavailable(f"households missing for {row['id']}")
+            households = int(match.group(1).replace(',', ''))
+            if households < MIN_HOUSEHOLDS:
+                continue
+            cid = row['id']
+            existing = self.complexes.get(cid, {})
+            self.complexes[cid] = {**existing, 'name':row['name'], 'households':households, '_dong_name':dong_name}
+            filtered_cids.append(cid)
+        self.list_inventories[target_url]['apartment_ids'] = filtered_cids[:]
+        logging.info('Region inventory COMPLETE %s: total=%s target_apartments=%s', dong_name,len(rows),len(filtered_cids))
+        # Backfill excludes identities already saved in the preserved source run.
+        skipped = getattr(self, 'skip_complex_ids', set())
+        for cid in filtered_cids:
+            if cid in skipped:
+                self.complexes.pop(cid, None)
+        filtered_cids = [cid for cid in filtered_cids if cid not in skipped]
         if not filtered_cids:
-            screenshot_path = self.screenshot_dir / (
-                f"debug_crawler_fail_{sanitize_filename(dong_name)}.png"
-            )
-            await page.screenshot(path=str(screenshot_path))
-            logging.error(f"Saved debug screenshot to {screenshot_path}")
-            return False
+            return True
 
-        # ========================================================
-        # [OPTIMIZATION] Parallel Fetch of Details (Complex & Pyeong)
-        # ========================================================
         async def fetch_one_complex(cid):
-            # 1. Complex Detail
-            if (
-                cid not in self.complexes
-                or "totalHouseholdNumber" not in self.complexes[cid]
-            ):
-                try:
-                    api_url = f"https://fin.land.naver.com/front-api/v1/complex?complexNumber={cid}"
-                    api_res = await page.request.get(api_url)
-                    if api_res.status == 200:
-                        data = await api_res.json()
-                        if "result" in data:
-                            new_data = data["result"]
-                            # Preserve custom fields from list
-                            if cid in self.complexes and isinstance(
-                                self.complexes[cid], dict
-                            ):
-                                new_data["_dong_name"] = self.complexes[cid].get(
-                                    "_dong_name"
-                                )
-                            self.complexes[cid] = new_data
-                except:
-                    pass
-
-            # 2. Pyeong List
-            if cid in self.complexes and "pyeongs" not in self.complexes[cid]:
-                try:
-                    pyeong_url = f"https://fin.land.naver.com/front-api/v1/complex/pyeongList?complexNumber={cid}"
-                    p_res = await page.request.get(pyeong_url)
-                    if p_res.status == 200:
-                        p_data = await p_res.json()
-                        if "result" in p_data:
-                            self.complexes[cid]["pyeongs"] = p_data["result"]
-                except:
-                    pass
-
-        logging.info(
-            f"⚡ Pre-fetching details for {len(filtered_cids)} complexes concurrently..."
-        )
-
+            saved = self.complexes[cid]
+            detail = await self._get_required_json(page, f'https://fin.land.naver.com/front-api/v1/complex?complexNumber={cid}')
+            if not isinstance(detail, dict) or not detail.get('name'):
+                raise ArticleResponseUnavailable(f'complex detail missing: {cid}')
+            pyeongs = await self._get_required_json(page, f'https://fin.land.naver.com/front-api/v1/complex/pyeongList?complexNumber={cid}')
+            if not isinstance(pyeongs, list) or any(not isinstance(p, dict) for p in pyeongs):
+                raise ArticleResponseUnavailable(f'pyeong list schema invalid: {cid}')
+            self.complexes[cid] = {**saved, **detail, '_dong_name':dong_name,
+                                  'households':saved['households'], 'pyeongs':pyeongs}
+            if not self.complexes[cid].get('totalHouseholdNumber'):
+                self.complexes[cid]['totalHouseholdNumber'] = saved['households']
         sem_api = asyncio.Semaphore(MAX_API_PREFETCH_CONCURRENCY)
-
         async def sem_task(cid):
             async with sem_api:
                 await fetch_one_complex(cid)
-
-        await asyncio.gather(*[sem_task(c) for c in filtered_cids])
-        logging.info("✅ Pre-fetch complete.")
-        # ========================================================
-
-        # 4. API Interception Setup
-        async def handle_response(response):
-            try:
-                await self._record_article_response(response)
-            except:
-                pass
-
-        page.on("response", handle_response)
+        results = await asyncio.gather(*(sem_task(cid) for cid in filtered_cids), return_exceptions=True)
+        errors = [r for r in results if isinstance(r, BaseException)]
+        if errors:
+            raise ArticleResponseUnavailable(f'metadata/pyeong incomplete: {errors[0]}')
 
         async def recreate_page(current_page):
             context = current_page.context
@@ -883,7 +864,6 @@ class NaverLandPlaywright:
             await new_page.add_init_script("""
                 Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
             """)
-            new_page.on("response", handle_response)
             return new_page
 
         async def visit_detail_with_retries(current_page, cid, t_type, retries=2):
@@ -900,6 +880,8 @@ class NaverLandPlaywright:
                         await self._fetch_remaining_article_pages(
                             current_page, cid, t_type
                         )
+                        if not self._has_complete_article_response(cid, t_type):
+                            raise ArticleResponseUnavailable(f'incomplete pages {cid} {t_type}')
                         self.article_attempts.add((str(cid), str(t_type)))
                         return current_page
 
@@ -915,7 +897,7 @@ class NaverLandPlaywright:
                         retries + 1,
                         e,
                     )
-                    if attempt > retries:
+                    if attempt > retries or self.rate_limit_count:
                         self.article_missing_responses.append(
                             {"complex_no": str(cid), "trade_type": str(t_type)}
                         )
@@ -947,50 +929,40 @@ class NaverLandPlaywright:
         # 5. Visit Details (Trigger article list)
         for cid in filtered_cids:
             for t_type in ["A1", "B1"]:
+                if self.rate_limit_count:
+                    return False
                 page = await visit_detail_with_retries(page, cid, t_type)
 
         article_summary = self._summarize_article_capture(filtered_cids)
         logging.info("Article capture summary for %s: %s", dong_name, article_summary)
 
-        if len(filtered_cids) >= MIN_COMPLEXES_FOR_ARTICLE_CHECK:
-            missing_ratio = (
-                article_summary["missing_all_complexes"] / len(filtered_cids)
-                if filtered_cids
-                else 0
-            )
-            if missing_ratio > MAX_ARTICLE_MISSING_COMPLEX_RATIO:
-                logging.error(
-                    "Article response capture failed for %s: missing_all_complexes=%s/%s "
-                    "(%.1f%%), allowed %.1f%%. This is capture failure, not confirmed no-listing.",
-                    dong_name,
-                    article_summary["missing_all_complexes"],
-                    len(filtered_cids),
-                    missing_ratio * 100,
-                    MAX_ARTICLE_MISSING_COMPLEX_RATIO * 100,
-                )
-                return False
-
+        incomplete = [(cid, trade) for cid in filtered_cids for trade in ['A1', 'B1']
+                      if not self._has_complete_article_response(cid, trade)]
+        if incomplete:
+            logging.error('Incomplete article pairs for %s: %s', dong_name, incomplete[:10])
+            return False
+        for cid in filtered_cids:
+            self._validate_empty_pyeong_catalog(cid)
         return True
 
-    async def _visit_detail_page(self, page, url):
-        """Helper to visit page and perform scrolling"""
-        # Reduce internal timeout to fail faster
-        await page.goto(url, wait_until="domcontentloaded", timeout=20000)
-        await page.wait_for_timeout(random.uniform(500, 1000))
+    def _validate_empty_pyeong_catalog(self, cid):
+        """A valid empty catalog is not an API failure, but prove no listings."""
+        if self.complexes[cid].get('pyeongs'):
+            return
+        for trade in ('A1', 'B1'):
+            if (not self._has_complete_article_response(cid, trade)
+                    or self.article_seen_ids.get((str(cid), trade))):
+                raise ArticleResponseUnavailable(
+                    f'empty pyeong catalog without proven empty articles: {cid} {trade}')
+        logging.info('Empty pyeong catalog with proven zero sale/rent listings: %s', cid)
 
-        last_height = await page.evaluate("document.body.scrollHeight")
-        no_change = 0
-        for _ in range(30):
-            await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
-            await page.wait_for_timeout(random.uniform(300, 600))
-            new_height = await page.evaluate("document.body.scrollHeight")
-            if new_height == last_height:
-                no_change += 1
-                if no_change >= 2:
-                    break
-            else:
-                no_change = 0
-            last_height = new_height
+    async def _visit_detail_page(self, page, url):
+        # First page capture is awaited by the caller; remaining pages use the
+        # validated cursor API. Do not scroll window: PC listings live in a panel.
+        if self.blocking_error or self.rate_limit_count:
+            raise ArticleResponseUnavailable(self.blocking_error or 'paused after rate limiting')
+        await page.goto(url, wait_until='domcontentloaded', timeout=20000)
+        await self._wait_buffer(0.5, 1.0)
 
     def process_data(self):
         processor = DataProcessor()
@@ -1010,93 +982,162 @@ class NaverLandPlaywright:
             elif complex_info:
                 cname = str(complex_info)
 
-            # Flatten
-            flat_articles = []
-            for item in articles_or_groups:
-                if "articleInfoList" in item:
-                    flat_articles.extend(item["articleInfoList"])
-                elif "representativeArticleInfo" in item:
-                    flat_articles.append(item["representativeArticleInfo"])
-                else:
-                    flat_articles.append(item)
+            # Preserve one logical listing per representative while retaining
+            # broker variants for extrema and floor-specific minimums.
+            logical_articles = []
+            seen_group_ids = set()
+            for item_index, item in enumerate(articles_or_groups):
+                if not isinstance(item, dict):
+                    continue
 
-            if not flat_articles:
+                if isinstance(item.get("representativeArticleInfo"), dict):
+                    representative = item["representativeArticleInfo"]
+                    variants = [representative]
+                    duplicated = item.get("duplicatedArticleInfo") or {}
+                    if isinstance(duplicated, dict):
+                        variants.extend(duplicated.get("articleInfoList") or [])
+                    candidates = [(representative, variants)]
+                elif isinstance(item.get("articleInfoList"), list):
+                    candidates = [(article, [article]) for article in item["articleInfoList"]]
+                else:
+                    candidates = [(item, [item])]
+
+                for candidate_index, (representative, variants) in enumerate(candidates):
+                    if not isinstance(representative, dict):
+                        continue
+                    article_number = representative.get("articleNumber")
+                    group_id = (
+                        str(article_number)
+                        if article_number not in (None, "")
+                        else f"anonymous:{item_index}:{candidate_index}"
+                    )
+                    if group_id in seen_group_ids:
+                        continue
+                    seen_group_ids.add(group_id)
+                    logical_articles.append(
+                        {
+                            "representative": representative,
+                            "variants": [v for v in variants if isinstance(v, dict)],
+                        }
+                    )
+
+            if not logical_articles:
                 continue
 
-            # Group by Pyeong
-            groups = {}
-            for art in flat_articles:
-                space = art.get("spaceInfo", {})
-                if not space and "supplySpaceName" in art:
-                    space = art
-                s_name = space.get("supplySpaceName", str(space.get("supplySpace", "")))
-                e_name = space.get(
-                    "exclusiveSpaceName", str(space.get("exclusiveSpace", ""))
+            def numeric_area(value):
+                try:
+                    return round(float(value), 3)
+                except (TypeError, ValueError):
+                    return 0.0
+
+            def area_details(article):
+                space = article.get("spaceInfo", {})
+                if not space and "supplySpace" in article:
+                    space = article
+                supply = numeric_area(space.get("supplySpace", 0))
+                exclusive = numeric_area(space.get("exclusiveSpace", 0))
+                supply_name = str(space.get("supplySpaceName") or "").strip()
+                exclusive_name = str(space.get("exclusiveSpaceName") or "").strip()
+                subtype = str(space.get("nameType") or "").strip()
+                if not subtype:
+                    suffixes = []
+                    for name in (supply_name, exclusive_name):
+                        match = re.search(r"([A-Za-z]+[0-9]*)$", name)
+                        if match:
+                            suffixes.append(match.group(1).upper())
+                    if suffixes and len(set(suffixes)) == 1:
+                        subtype = suffixes[0]
+                numeric_labels = all(not name or re.fullmatch(r"[0-9]+(?:\.[0-9]+)?", name)
+                                     for name in (supply_name, exclusive_name))
+                label_identity = subtype or (
+                    (supply_name, exclusive_name)
+                    if (supply_name or exclusive_name) and not numeric_labels
+                    else None
                 )
-                ptp_key = f"{s_name}_{e_name}"
+                return space, (supply, exclusive), label_identity
+
+            named_area_identities = {}
+            for entry in logical_articles:
+                _, numeric_key, label_identity = area_details(entry["representative"])
+                if label_identity is not None:
+                    named_area_identities.setdefault(numeric_key, set()).add(label_identity)
+
+            # Group by canonical numeric areas plus named subtype. Missing labels
+            # merge only when the numeric area has exactly one named subtype.
+            groups = {}
+            for entry in logical_articles:
+                art = entry["representative"]
+                space, numeric_key, label_identity = area_details(art)
+                if label_identity is None:
+                    candidates = named_area_identities.get(numeric_key, set())
+                    if len(candidates) == 1:
+                        label_identity = next(iter(candidates))
+                ptp_key = (*numeric_key, str(label_identity))
 
                 if ptp_key not in groups:
-                    groups[ptp_key] = {"trade": [], "rent": [], "info": art}
+                    groups[ptp_key] = {"trade": [], "rent": [], "info": art, "label_identity": label_identity}
+                elif not (groups[ptp_key]["info"].get("spaceInfo") or {}).get(
+                    "supplySpaceName"
+                ) and space.get("supplySpaceName"):
+                    groups[ptp_key]["info"] = art
 
                 t_type = art.get("tradeType", "")
-
-                floor_str = "-"
-                floor_info = art.get("floorDetailInfo")
-                if not floor_info:
-                    detail = art.get("articleDetail", {})
-                    floor_info = detail.get("floorDetailInfo")
-                    if not floor_info:
-                        floor_str = detail.get("floorInfo", "-")
-
-                if floor_info:
-                    floor_str = f"{floor_info.get('targetFloor', '')}/{floor_info.get('totalFloor', '')}"
-
-                art["_mapped_price"] = 0
-
-                price_info = art.get("priceInfo", {})
-                price = 0
+                price_info = art.get("priceInfo") or {}
+                price_value = (
+                    price_info.get("dealPrice", art.get("dealPrice"))
+                    if t_type in ["A1", "매매"]
+                    else price_info.get("warrantyPrice", art.get("warrantyPrice"))
+                )
+                if processor.positive_price(price_value) is None:
+                    continue
                 if t_type in ["A1", "매매"]:
-                    price = (
-                        price_info.get("dealPrice", 0)
-                        if price_info
-                        else art.get("dealPrice", 0)
-                    )
+                    groups[ptp_key]["trade"].append(entry)
                 elif t_type in ["B1", "전세"]:
-                    price = (
-                        price_info.get("warrantyPrice", 0)
-                        if price_info
-                        else art.get("warrantyPrice", 0)
-                    )
-
-                art["_mapped_price"] = price
-                art["_mapped_floor"] = floor_str
-
-                if t_type in ["A1", "매매"]:
-                    groups[ptp_key]["trade"].append(art)
-                elif t_type in ["B1", "전세"]:
-                    groups[ptp_key]["rent"].append(art)
+                    groups[ptp_key]["rent"].append(entry)
 
             def get_stats(items, is_trade=True):
                 if not items:
                     return 0, 0, 0, 0, 0, 0
-                items.sort(key=lambda x: int(x.get("_mapped_price", 0)))
+                representative_prices = []
+                variant_prices = []
+                seen_variant_ids = set()
+                price_field = "dealPrice" if is_trade else "warrantyPrice"
+                for entry in items:
+                    representative = entry["representative"]
+                    rep_info = representative.get("priceInfo") or {}
+                    rep_price = processor.positive_price(
+                        rep_info.get(price_field, representative.get(price_field))
+                    )
+                    if rep_price is not None:
+                        representative_prices.append(rep_price)
 
-                std = [
-                    x
-                    for x in items
-                    if not processor.is_low_floor(x.get("_mapped_floor", ""))
-                ]
-                spc = [
-                    x
-                    for x in items
-                    if processor.is_low_floor(x.get("_mapped_floor", ""))
-                ]
+                    for variant_index, variant in enumerate(entry["variants"]):
+                        variant_id = variant.get("articleNumber")
+                        variant_id = (
+                            str(variant_id)
+                            if variant_id not in (None, "")
+                            else f"anonymous:{id(entry)}:{variant_index}"
+                        )
+                        if variant_id in seen_variant_ids:
+                            continue
+                        seen_variant_ids.add(variant_id)
+                        price_info = variant.get("priceInfo") or {}
+                        price = processor.positive_price(
+                            price_info.get(price_field, variant.get(price_field))
+                        )
+                        if price is not None:
+                            variant_prices.append((price, processor.floor_category(variant)))
 
-                min_std = std[0]["_mapped_price"] if std else 0
-                min_spc = spc[0]["_mapped_price"] if spc else 0
-                min_total = items[0]["_mapped_price"]
-                max_val = items[-1]["_mapped_price"]
-                avg = sum(x["_mapped_price"] for x in items) / len(items)
+                if not representative_prices or not variant_prices:
+                    return 0, 0, 0, 0, 0, 0
+                std = sorted(price for price, floor in variant_prices if floor == "normal")
+                spc = sorted(price for price, floor in variant_prices if floor == "low")
+                all_prices = sorted(price for price, _ in variant_prices)
+                min_std = std[0] if std else 0
+                min_spc = spc[0] if spc else 0
+                min_total = all_prices[0]
+                max_val = all_prices[-1]
+                avg = sum(representative_prices) / len(representative_prices)
                 return min_std, min_spc, min_total, max_val, avg, len(items)
 
             for ptp_key, g in groups.items():
@@ -1106,7 +1147,9 @@ class NaverLandPlaywright:
                 tm_std, tm_spc, tm_min_total, tm_max, tm_avg, tm_cnt = get_stats(
                     g["trade"]
                 )
-                _, _, rm_min_total, rm_max, rm_avg, rm_cnt = get_stats(g["rent"])
+                _, _, rm_min_total, rm_max, rm_avg, rm_cnt = get_stats(
+                    g["rent"], is_trade=False
+                )
                 rm_min = rm_min_total
 
                 base_price = tm_std if tm_std > 0 else tm_spc
@@ -1120,6 +1163,13 @@ class NaverLandPlaywright:
 
                 info = g["info"]
                 space = info.get("spaceInfo", {}) or info
+                # Keep the grouping subtype in the persisted type when the API
+                # supplies only a numeric label (or no label at all).
+                type_name = str(space.get("supplySpaceName") or
+                                numeric_area(space.get("supplySpace", 0)))
+                subtype = g["label_identity"]
+                if isinstance(subtype, str) and re.fullmatch(r"[0-9]+(?:\.[0-9]+)?", type_name):
+                    type_name += subtype
 
                 coords = complex_info.get("coordinates") or {}
                 lat = coords.get("yCoordinate") or ""
@@ -1135,7 +1185,7 @@ class NaverLandPlaywright:
                 hallway_type = ""
                 room_bath_str = ""
 
-                target_space = float(space.get("supplySpace", 0))
+                target_space = numeric_area(space.get("supplySpace", 0))
 
                 matched_pyeong = None
                 pyeongs = complex_info.get("pyeongs", [])
@@ -1151,7 +1201,7 @@ class NaverLandPlaywright:
                     for p in pyeongs:
                         p_supply = float(p.get("supplyArea", 0))
                         p_exclusive = float(p.get("exclusiveArea", 0))
-                        target_exclusive = float(space.get("exclusiveSpace", 0))
+                        target_exclusive = numeric_area(space.get("exclusiveSpace", 0))
                         if (
                             abs(p_supply - target_space) < 0.1
                             and abs(p_exclusive - target_exclusive) < 0.1
@@ -1242,6 +1292,7 @@ class NaverLandPlaywright:
                         sido = sido or d_parts[0]
                         gungu = gungu or d_parts[1]
                         # dong already cleaned above
+                sido = normalize_business_region(sido, gungu, dong_full_path)
                 approval_date = complex_info.get("useApprovalDate", "")
 
                 results.append(
@@ -1251,10 +1302,11 @@ class NaverLandPlaywright:
                         "읍/면/동": dong,
                         "아파트명": cname,
                         "준공일": approval_date,
-                        "총세대수": complex_info.get("totalHouseholdNumber", 0),
-                        "타입": space.get("supplySpaceName", "Unknown"),
-                        "공급면적": float(space.get("supplySpace", 0)),
-                        "전용면적": float(space.get("exclusiveSpace", 0)),
+                        "총세대수": complex_info.get("totalHouseholdNumber", 0)
+                        or household_count_from_list,
+                        "타입": type_name,
+                        "공급면적": numeric_area(space.get("supplySpace", 0)),
+                        "전용면적": numeric_area(space.get("exclusiveSpace", 0)),
                         "현관구조": hallway_type,
                         "방/욕실": room_bath_str,
                         "매매 최저가 (일반)": fmt(tm_std) if tm_cnt > 0 else "",
@@ -1292,18 +1344,13 @@ class NaverLandPlaywright:
 
 # Helper Functions
 def get_all_leaf_items(node, current_name=""):
-    # Optimization: Skip if validated as empty (and flag exists)
-    if node.get("has_complexes") is False:
-        return []
-
     items = []
     if "children" in node and node["children"]:
         for k, v in node["children"].items():
             # ✅ FIX: keep full path
             next_name = f"{current_name} {k}".strip()
             items.extend(get_all_leaf_items(v, next_name))
-    elif "url" in node:
-        # Leaf node
+    elif "url" in node and node.get("has_complexes") is not False:
         items.append((current_name, node["url"]))
     return items
 
@@ -1311,13 +1358,12 @@ def get_all_leaf_items(node, current_name=""):
 def get_region_urls(region_list):
     json_path = REGION_JSON_PATH
     if not os.path.exists(json_path):
-        print(f"❌ {json_path} not found.")
-        return []
+        raise ValueError(f'region file missing: {json_path}')
     try:
         with open(json_path, "r", encoding="utf-8") as f:
             data = json.load(f)
-    except:
-        return []
+    except Exception as exc:
+        raise ValueError('region JSON could not be read') from exc
 
     final_items = []  # List of (name, url)
 
@@ -1355,8 +1401,7 @@ def get_region_urls(region_list):
             start_node, start_node_key = find_node_recursive(data, root_part)
 
         if not start_node:
-            print(f"⚠️ Region not found: {root_part}")
-            continue
+            raise ValueError(f'Region not found: {root_part}')
 
         curr = start_node
         valid_path = True
@@ -1405,6 +1450,8 @@ def get_region_urls(region_list):
                 valid_path = False
                 break
 
+        if not valid_path:
+            raise ValueError(f'Region path unresolved: {query}')
         if valid_path:
             # ✅ FIX: pass full query string, not only last token
             if "url" in curr and "children" not in curr:
@@ -1428,6 +1475,41 @@ def get_subregions(region_name):
     except:
         pass
     return []
+
+
+def _upsert_complex(cur, values):
+    cur.execute(
+        """
+        INSERT INTO complexes (
+            complex_no, name, region_depth1, region_depth2, region_depth3,
+            total_households, total_dongs, completion_date, construction_company,
+            heating_method, heating_fuel, parking_per_household,
+            far, bcr, latitude, longitude, last_updated
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(complex_no) DO UPDATE SET
+            name = CASE
+                WHEN excluded.name = '' OR excluded.name = 'Complex_' || excluded.complex_no
+                THEN COALESCE(NULLIF(complexes.name, ''), excluded.name)
+                ELSE excluded.name
+            END,
+            region_depth1 = COALESCE(NULLIF(excluded.region_depth1, ''), complexes.region_depth1),
+            region_depth2 = COALESCE(NULLIF(excluded.region_depth2, ''), complexes.region_depth2),
+            region_depth3 = COALESCE(NULLIF(excluded.region_depth3, ''), complexes.region_depth3),
+            total_households = COALESCE(NULLIF(excluded.total_households, 0), complexes.total_households),
+            total_dongs = COALESCE(NULLIF(excluded.total_dongs, 0), complexes.total_dongs),
+            completion_date = COALESCE(NULLIF(excluded.completion_date, ''), complexes.completion_date),
+            construction_company = COALESCE(NULLIF(excluded.construction_company, ''), complexes.construction_company),
+            heating_method = COALESCE(NULLIF(excluded.heating_method, ''), complexes.heating_method),
+            heating_fuel = COALESCE(NULLIF(excluded.heating_fuel, ''), complexes.heating_fuel),
+            parking_per_household = COALESCE(NULLIF(excluded.parking_per_household, 0), complexes.parking_per_household),
+            far = COALESCE(NULLIF(excluded.far, 0), complexes.far),
+            bcr = COALESCE(NULLIF(excluded.bcr, 0), complexes.bcr),
+            latitude = COALESCE(NULLIF(excluded.latitude, 0), complexes.latitude),
+            longitude = COALESCE(NULLIF(excluded.longitude, 0), complexes.longitude),
+            last_updated = excluded.last_updated
+        """,
+        values,
+    )
 
 
 def init_db():
@@ -1483,18 +1565,41 @@ def init_db():
     )
     """)
 
-    cur.execute(
-        "CREATE INDEX IF NOT EXISTS idx_prices_complex_date ON prices (complex_no, date)"
-    )
-
-    conn.commit()
-    conn.close()
+    try:
+        duplicate = cur.execute(
+            """
+            SELECT complex_no, date, pyeong_type, supply_area, exclusive_area, COUNT(*)
+            FROM prices
+            GROUP BY complex_no, date, pyeong_type, supply_area, exclusive_area
+            HAVING COUNT(*) > 1
+            LIMIT 1
+            """
+        ).fetchone()
+        if duplicate:
+            raise RuntimeError(
+                "duplicate canonical price snapshots exist; refusing automatic migration"
+            )
+        cur.execute(
+            "CREATE INDEX IF NOT EXISTS idx_prices_complex_date ON prices (complex_no, date)"
+        )
+        cur.execute(
+            """
+            CREATE UNIQUE INDEX IF NOT EXISTS uq_prices_canonical_snapshot
+            ON prices (complex_no, date, pyeong_type, supply_area, exclusive_area)
+            """
+        )
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
 
 
 def save_to_db(df, table_name="real_estate"):
     """Save DataFrame to Normalized SQLite Database"""
     if df.empty:
-        return
+        return 0
 
     conn = sqlite3.connect(DB_PATH)
     cur = conn.cursor()
@@ -1517,15 +1622,8 @@ def save_to_db(df, table_name="real_estate"):
         for cid, group in complex_groups:
             first = group.iloc[0]
 
-            cur.execute(
-                """
-            INSERT OR REPLACE INTO complexes (
-                complex_no, name, region_depth1, region_depth2, region_depth3,
-                total_households, total_dongs, completion_date, construction_company,
-                heating_method, heating_fuel, parking_per_household,
-                far, bcr, latitude, longitude, last_updated
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
+            _upsert_complex(
+                cur,
                 (
                     int(cid),
                     first["아파트명"],
@@ -1558,13 +1656,28 @@ def save_to_db(df, table_name="real_estate"):
                     rent_min, rent_max, rent_avg, rent_count,
                     gap, jeonse_ratio
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(complex_no, date, pyeong_type, supply_area, exclusive_area)
+                DO UPDATE SET
+                    hallway_type = excluded.hallway_type,
+                    room_bath = excluded.room_bath,
+                    trade_min_std = excluded.trade_min_std,
+                    trade_min_low = excluded.trade_min_low,
+                    trade_max = excluded.trade_max,
+                    trade_avg = excluded.trade_avg,
+                    trade_count = excluded.trade_count,
+                    rent_min = excluded.rent_min,
+                    rent_max = excluded.rent_max,
+                    rent_avg = excluded.rent_avg,
+                    rent_count = excluded.rent_count,
+                    gap = excluded.gap,
+                    jeonse_ratio = excluded.jeonse_ratio
                 """,
                     (
                         int(cid),
                         row["수집일"],
                         row["타입"],
-                        float(row["공급면적"] or 0),
-                        float(row["전용면적"] or 0),
+                        round(float(row["공급면적"] or 0), 3),
+                        round(float(row["전용면적"] or 0), 3),
                         row.get("현관구조", ""),
                         row.get("방/욕실", ""),
                         parse_price(row["매매 최저가 (일반)"]),
@@ -1584,14 +1697,17 @@ def save_to_db(df, table_name="real_estate"):
 
         conn.commit()
         print(
-            f"💾 Database Updated: {count_complex} complexes updated, {count_prices} price records added."
+            f"💾 Database Updated: {count_complex} complexes updated, {count_prices} price records committed."
         )
+        return count_prices
 
     except Exception as e:
+        conn.rollback()
         print(f"❌ Database Error: {e}")
         import traceback
 
         traceback.print_exc()
+        raise
     finally:
         conn.close()
 
@@ -1602,10 +1718,11 @@ def save_complexes_metadata_only(complexes_dict):
     ✅ FIX: if address(dict) is missing, fallback parse from _dong_name full path like "서울시 강남구 신사동"
     """
     if not complexes_dict:
-        return
+        return 0
 
     conn = sqlite3.connect(DB_PATH)
     cur = conn.cursor()
+    committed_count = 0
 
     try:
         for cid, info in complexes_dict.items():
@@ -1613,7 +1730,9 @@ def save_complexes_metadata_only(complexes_dict):
                 continue
 
             name = (
-                info.get("name", "") or info.get("complexName", "") or f"Complex_{cid}"
+                info.get("name", "")
+                or info.get("complexName", "")
+                or f"Complex_{cid}"
             )
 
             addr = info.get("address", {})
@@ -1655,6 +1774,7 @@ def save_complexes_metadata_only(complexes_dict):
             if dong and isinstance(dong, str) and " " in dong:
                 dong = dong.split()[-1]
 
+            sido = normalize_business_region(sido, gungu, dong_path)
             coords = info.get("coordinates") or {}
             lat = coords.get("yCoordinate") or 0
             lon = coords.get("xCoordinate") or 0
@@ -1678,15 +1798,8 @@ def save_complexes_metadata_only(complexes_dict):
 
             construction_company = info.get("constructionCompany", "") or ""
 
-            cur.execute(
-                """
-            INSERT OR REPLACE INTO complexes (
-                complex_no, name, region_depth1, region_depth2, region_depth3,
-                total_households, total_dongs, completion_date, construction_company,
-                heating_method, heating_fuel, parking_per_household,
-                far, bcr, latitude, longitude, last_updated
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
+            _upsert_complex(
+                cur,
                 (
                     int(cid),
                     name,
@@ -1707,166 +1820,113 @@ def save_complexes_metadata_only(complexes_dict):
                     datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                 ),
             )
+            committed_count += 1
 
         conn.commit()
         print(
-            f"💾 complexes metadata only saved/updated: {len(complexes_dict)} candidates processed."
+            f"💾 complexes metadata only saved/updated: {committed_count} rows committed."
         )
+        return committed_count
 
     except Exception as e:
+        conn.rollback()
         print(f"❌ complexes metadata save error: {e}")
         import traceback
 
         traceback.print_exc()
+        raise
     finally:
         conn.close()
 
 
 # 분산 처리(Sharding)를 위한 헬퍼 함수
 def get_sharded_targets(shard_index, shard_total):
-    json_path = REGION_JSON_PATH
-    if not os.path.exists(json_path):
-        print(f"❌ {json_path} not found.")
-        return []
-
-    with open(json_path, "r", encoding="utf-8") as f:
+    if shard_total <= 0 or shard_index < 0 or shard_index >= shard_total:
+        raise ValueError('invalid shard index/total')
+    with open(REGION_JSON_PATH, encoding='utf-8') as f:
         data = json.load(f)
-
-    all_targets = []
-
-    def collect(node, path_name):
-        is_valid = node.get("has_complexes", False)
-
-        if "url" in node and is_valid:
-            all_targets.append({"name": path_name, "url": node["url"]})
-
-        if "children" in node:
-            for k, v in node["children"].items():
-                collect(v, f"{path_name} {k}".strip())
-
-    for k, v in data.items():
-        collect(v, k)
-
-    all_targets.sort(key=lambda x: x["name"])
-
-    total_count = len(all_targets)
-    if total_count == 0:
-        return []
-
-    sharded = all_targets[shard_index::shard_total]
-    print(
-        f"[Shard] {shard_index}/{shard_total} (Stripe): Processing {len(sharded)} regions"
-    )
-
-    return sharded
+    targets = []
+    seen = {}
+    for root, node in data.items():
+        for name, url in get_all_leaf_items(node, root):
+            if url in seen:
+                if seen[url] != name:
+                    raise ValueError(f'duplicate leaf region URL: {seen[url]} / {name}')
+                continue
+            seen[url] = name
+            targets.append({'name':name,'url':url})
+    targets.sort(key=lambda row:row['name'])
+    if not targets:
+        raise ValueError('no validated leaf targets')
+    return targets[shard_index::shard_total]
 
 
 async def main():
-    parser = argparse.ArgumentParser(description="Naver Land Crawler")
-    parser.add_argument(
-        "--regions", nargs="+", help="List of regions to crawl (overrides config)"
-    )
-    parser.add_argument(
-        "--db-path", default="real_estate.db", help="Path to output SQLite DB"
-    )
-    parser.add_argument(
-        "--shard-index", type=int, default=None, help="Shard Index (0-based)"
-    )
-    parser.add_argument("--shard-total", type=int, default=None, help="Total Shards")
-    parser.add_argument("--log-path", help="Path to crawler log file")
-    parser.add_argument("--screenshot-dir", help="Directory for debug screenshots")
-    parser.add_argument("--region-json-path", help="Path to region codes JSON file")
+    parser = argparse.ArgumentParser(description='Naver Land Crawler')
+    parser.add_argument('--regions', nargs='+')
+    parser.add_argument('--db-path', default='real_estate.db')
+    parser.add_argument('--shard-index', type=int)
+    parser.add_argument('--shard-total', type=int)
+    parser.add_argument('--log-path')
+    parser.add_argument('--screenshot-dir')
+    parser.add_argument('--region-json-path')
+    parser.add_argument('--targets-json', help='Explicit [{name,url}] targets for bounded repair/probes')
+    parser.add_argument('--skip-existing-db', help='Read-only original DB: collect missing or metadata-only complexes')
+    parser.add_argument('--headed', action='store_true')
+    parser.add_argument('--inventory-preflight', action='store_true')
     args = parser.parse_args()
-
+    if (args.shard_index is None) != (args.shard_total is None):
+        parser.error('--shard-index and --shard-total must be supplied together')
+    if args.targets_json and (args.regions or args.shard_index is not None):
+        parser.error('--targets-json cannot be combined with region/shard selection')
     global DB_PATH, CRAWLER_LOG_PATH, SCREENSHOT_DIR, REGION_JSON_PATH
-    if args.db_path:
-        DB_PATH = str(Path(args.db_path).expanduser())
-        print(f"[Config] Override: DB Path set to {DB_PATH}")
-
+    DB_PATH = str(Path(args.db_path).expanduser())
     if args.log_path:
         CRAWLER_LOG_PATH = str(Path(args.log_path).expanduser())
-
     if args.screenshot_dir:
         SCREENSHOT_DIR = str(Path(args.screenshot_dir).expanduser())
-
     if args.region_json_path:
         REGION_JSON_PATH = str(Path(args.region_json_path).expanduser())
-
-    ensure_directory(SCREENSHOT_DIR)
     configure_logging(CRAWLER_LOG_PATH)
-
-    init_db()
-
-    regions_to_process = []
-    direct_targets = []
-
-    # Case A: Sharding Mode
-    if args.shard_index is not None and args.shard_total is not None:
-        print(
-            f"[Shard] Sharding Enabled: Index {args.shard_index} / Total {args.shard_total}"
-        )
-        direct_targets = get_sharded_targets(args.shard_index, args.shard_total)
-
-    # Case B: Manual Region List
-    elif args.regions:
-        target_regions_config = args.regions
-        print(f"[Config] Override: Target Regions set to {target_regions_config}")
-
-        for target in target_regions_config:
-            subregions = get_subregions(target)
-            if subregions:
-                for sub in subregions:
-                    regions_to_process.append(f"{target} {sub}")
-            else:
-                regions_to_process.append(target)
-
-    # Case C: Default Config
-    else:
-        target_regions_config = TARGET_REGIONS
-        for target in target_regions_config:
-            subregions = get_subregions(target)
-            if subregions:
-                for sub in subregions:
-                    regions_to_process.append(f"{target} {sub}")
-            else:
-                regions_to_process.append(target)
-
-    # Execution
-    if direct_targets:
-        print(f"🚀 Starting Sharded Crawl with {len(direct_targets)} locations...")
+    if args.inventory_preflight:
+        targets = get_sharded_targets(0, 1)[:1]
         crawler = NaverLandPlaywright(screenshot_dir=SCREENSHOT_DIR)
-        urls = [(t["name"], t["url"]) for t in direct_targets]
-        ok = await crawler.run_test(urls, headless=HEADLESS_MODE)
-        if not ok:
-            raise SystemExit(1)
-
+        async with async_playwright() as p:
+            browser = await p.chromium.launch(headless=not args.headed and os.getenv('CRAWLER_HEADLESS', '1') != '0', args=['--disable-blink-features=AutomationControlled'])
+            try:
+                context = await browser.new_context(**crawler.get_context_options())
+                page = await context.new_page()
+                await page.add_init_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined});")
+                rows = await crawler._load_region_complexes(page, targets[0]['url'])
+                logging.info('PREFLIGHT PASS %s: %s complexes', targets[0]['name'], len(rows))
+            finally:
+                await browser.close()
+        return
+    if args.targets_json:
+        targets = json.loads(Path(args.targets_json).read_text())
+        if not isinstance(targets, list) or any(not isinstance(t,dict) or not t.get('name') or not t.get('url') for t in targets):
+            parser.error('invalid targets JSON')
+    elif args.shard_index is not None:
+        targets = get_sharded_targets(args.shard_index, args.shard_total)
     else:
-        if not regions_to_process and TARGET_URLS:
-            regions_to_process = ["UNKNOWN_REGION"]
-
-        if not regions_to_process:
-            print("❌ No items to process.")
-            return
-
-        print(f"📋 Processing Queue: {len(regions_to_process)} regions.")
-        for region_name in regions_to_process:
-            if region_name == "UNKNOWN_REGION":
-                current_urls = TARGET_URLS[:]
-            else:
-                print(f"\n Target: {region_name} ...")
-                current_urls = get_region_urls([region_name])
-
-            if not current_urls:
-                print(f"⚠️ No URLs found for {region_name}")
-                continue
-
-            crawler = NaverLandPlaywright(screenshot_dir=SCREENSHOT_DIR)
-            crawler.region_name = region_name
-            print(f"🚀 Crawling {region_name} (URLs: {len(current_urls)})...")
-            ok = await crawler.run_test(current_urls, headless=HEADLESS_MODE)
-            if not ok:
-                raise SystemExit(1)
+        pairs = get_region_urls(args.regions or TARGET_REGIONS)
+        targets = [{'name':n,'url':u} for n,u in pairs]
+    if not targets:
+        parser.error('requested selection produced no targets')
+    if len({t['url'] for t in targets}) != len(targets):
+        parser.error('duplicate target URLs')
+    crawler = NaverLandPlaywright(screenshot_dir=SCREENSHOT_DIR)
+    if args.skip_existing_db:
+        source = Path(args.skip_existing_db).resolve()
+        if source == Path(DB_PATH).resolve():
+            parser.error('backfill output must not overwrite source DB')
+        with sqlite3.connect(source.as_uri() + '?mode=ro', uri=True) as conn:
+            crawler.skip_complex_ids = {str(r[0]) for r in conn.execute('select distinct complex_no from prices')}
+    init_db()
+    ok = await crawler.run_test([(t['name'],t['url']) for t in targets],headless=not args.headed and os.getenv('CRAWLER_HEADLESS', '1') != '0')
+    if not ok:
+        raise SystemExit(1)
 
 
-if __name__ == "__main__":
+if __name__ == '__main__':
     asyncio.run(main())

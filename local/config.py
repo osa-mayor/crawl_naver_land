@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -80,6 +81,7 @@ class CrawlSettings:
     max_article_pages_per_trade: int
     max_article_missing_complex_ratio: float
     min_complexes_for_article_check: int
+    headless: bool = True
 
 
 @dataclass(frozen=True)
@@ -141,6 +143,41 @@ def _resolve_path(base: Path, value: str) -> Path:
     return path
 
 
+def _validate_shard_plan(
+    shard_total: int,
+    shard_groups: list[str],
+    max_local_parallel: int,
+    max_concurrent_pages: int,
+    max_api_prefetch_concurrency: int,
+) -> None:
+    positive_values = {
+        "shard_total": shard_total,
+        "max_local_parallel": max_local_parallel,
+        "max_concurrent_pages": max_concurrent_pages,
+        "max_api_prefetch_concurrency": max_api_prefetch_concurrency,
+    }
+    for name, value in positive_values.items():
+        if value <= 0:
+            raise ValueError(f"crawl.{name} must be positive")
+
+    covered: list[int] = []
+    for group in shard_groups:
+        match = re.fullmatch(r"(-?\d+)-(-?\d+)", str(group).strip())
+        if not match:
+            raise ValueError(f"invalid crawl.shard_groups entry: {group!r}")
+        start, end = (int(value) for value in match.groups())
+        if start < 0 or end < 0 or start > end:
+            raise ValueError(f"invalid crawl.shard_groups range: {group!r}")
+        covered.extend(range(start, end + 1))
+
+    expected = list(range(shard_total))
+    if sorted(covered) != expected:
+        raise ValueError(
+            "crawl.shard_groups must cover every shard exactly once; "
+            f"expected={expected}, configured={covered}"
+        )
+
+
 def load_config(path: str | Path) -> LocalConfig:
     config_path = Path(path).expanduser().resolve()
     with config_path.open("r", encoding="utf-8") as f:
@@ -153,7 +190,10 @@ def load_config(path: str | Path) -> LocalConfig:
     )
 
     crawl_raw = raw.get("crawl", {})
+    if not isinstance(crawl_raw.get("headless", True), bool):
+        raise ValueError("crawl.headless must be a boolean")
     crawl = CrawlSettings(
+        headless=crawl_raw.get("headless", True),
         shard_total=int(crawl_raw.get("shard_total", 20)),
         shard_groups=list(crawl_raw.get("shard_groups", DEFAULT_SHARD_GROUPS)),
         max_local_parallel=int(crawl_raw.get("max_local_parallel", 2)),
@@ -188,6 +228,13 @@ def load_config(path: str | Path) -> LocalConfig:
         min_complexes_for_article_check=int(
             crawl_raw.get("min_complexes_for_article_check", 20)
         ),
+    )
+    _validate_shard_plan(
+        crawl.shard_total,
+        crawl.shard_groups,
+        crawl.max_local_parallel,
+        crawl.max_concurrent_pages,
+        crawl.max_api_prefetch_concurrency,
     )
 
     export_jobs = [

@@ -2,7 +2,7 @@
   "project_root": "/Users/pyo/Projects/crawl_naver_land",
   "runtime_root": "runtime",
   "region_json_path": "naver_region_codes.json",
-  "preflight_smoke_test": false,
+  "preflight_smoke_test": true,
   "retention_days": 14,
   "crawl": {
     "shard_total": 20,
@@ -33,7 +33,8 @@
     "article_response_timeout_ms": 15000,
     "max_article_pages_per_trade": 80,
     "max_article_missing_complex_ratio": 0.5,
-    "min_complexes_for_article_check": 20
+    "min_complexes_for_article_check": 20,
+    "headless": true
   },
   "exports": [
     {
