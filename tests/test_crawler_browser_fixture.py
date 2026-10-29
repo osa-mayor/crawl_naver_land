@@ -26,6 +26,12 @@ class ListBrowserTests(unittest.IsolatedAsyncioTestCase):
   self.assertEqual(len(await self.load(html)),2)
  async def test_proven_empty(self):
   self.assertEqual(await self.load('<strong>총 0개 단지</strong>'),[])
+ async def test_explicit_empty_component_without_total(self):
+  self.assertEqual(await self.load('<p class="ComplexListByRegion-module_nodata">단지가 없습니다.</p>'),[])
+ async def test_direct_retry_drops_old_resolution(self):
+  self.c.region_resolutions['https://fixture.test/regions']={'url':'https://fixture.test/new','name':'구지읍'}
+  await self.load('<strong>총 0개 단지</strong>')
+  self.assertNotIn('https://fixture.test/regions',self.c.region_resolutions)
  async def test_missing_badge_with_name_first_line_is_failure_not_empty(self):
   html='<strong>총 1개 단지</strong><li><strong class="name">청운현대</strong><p>999세대</p><a href="/complexes/1">단지 보러가기</a></li>'
   with self.assertRaisesRegex(ArticleResponseUnavailable, 'category'):

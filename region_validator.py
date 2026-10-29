@@ -2,23 +2,18 @@ import asyncio
 import json
 import logging
 import os
-from typing import Any
+import tempfile
+from typing import Any, Optional
+from urllib.parse import urlparse
 
 from playwright.async_api import async_playwright
+
+from region_navigation import RegionNavigationError, navigate_region, read_region_total
 
 
 REGION_FILE = os.getenv("REGION_FILE", "naver_region_codes.json")
 MAX_CONCURRENT_TABS = int(os.getenv("MAX_CONCURRENT_TABS", "5"))
 TIMEOUT_MS = int(os.getenv("REGION_VALIDATOR_TIMEOUT_MS", "10000"))
-
-SELECTOR_NO_RESULT = "div[class*='no_result'], div[class*='no_data']"
-COMPLEX_SELECTORS = [
-    "li[class*='ComplexItem'][class*='article']",
-    "div[class*='list_complex']",
-    "button[class*='complex_link']",
-    "li[class*='ComplexItem']",
-]
-
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(message)s")
 
@@ -29,8 +24,22 @@ def load_region_data(path: str) -> dict[str, Any]:
 
 
 def save_region_data(path: str, data: dict[str, Any]) -> None:
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
+    directory = os.path.dirname(os.path.abspath(path))
+    fd, temporary_path = tempfile.mkstemp(
+        dir=directory, prefix=f".{os.path.basename(path)}.", suffix=".tmp"
+    )
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(temporary_path, path)
+    except BaseException:
+        try:
+            os.unlink(temporary_path)
+        except FileNotFoundError:
+            pass
+        raise
 
 
 def collect_leaf_tasks(data: dict[str, Any]) -> list[tuple[list[str], dict[str, Any]]]:
@@ -52,7 +61,11 @@ def collect_leaf_tasks(data: dict[str, Any]) -> list[tuple[list[str], dict[str, 
     return tasks
 
 
-async def check_url(context, url: str) -> bool:
+async def _read_proven_region_status(page) -> bool:
+    return await read_region_total(page, timeout=TIMEOUT_MS) > 0
+
+
+async def check_url(context, url: str, region_name: Optional[str] = None) -> bool:
     page = await context.new_page()
     await page.add_init_script(
         """
@@ -60,35 +73,47 @@ async def check_url(context, url: str) -> bool:
         """
     )
 
+    rate_limited = asyncio.Event()
+    rate_limit_url: list[str] = []
+
+    def observe_response(response) -> None:
+        hostname = urlparse(response.url).hostname or ""
+        if response.status == 429 and (
+            hostname == "naver.com" or hostname.endswith(".naver.com")
+        ):
+            rate_limit_url.append(response.url)
+            rate_limited.set()
+
+    page.on("response", observe_response)
+
+    async def navigate_and_check() -> bool:
+        resolved = await navigate_region(page, url, region_name)
+        if (
+            not isinstance(resolved, dict)
+            or not resolved.get("url")
+            or "name" not in resolved
+        ):
+            raise RegionNavigationError("region navigation did not return a resolved URL and name")
+        return await _read_proven_region_status(page)
+
+    check_task = asyncio.create_task(navigate_and_check())
+    rate_limit_task = asyncio.create_task(rate_limited.wait())
     try:
-        await page.goto(url, wait_until="domcontentloaded", timeout=max(TIMEOUT_MS, 30000))
-
-        try:
-            async with page.expect_response(
-                lambda response: "complex" in response.url and response.status == 200,
-                timeout=min(TIMEOUT_MS, 10000),
-            ):
-                pass
-        except Exception:
-            pass
-
-        if await page.query_selector(SELECTOR_NO_RESULT):
-            return False
-
-        await page.wait_for_timeout(min(TIMEOUT_MS, 5000))
-
-        for selector in COMPLEX_SELECTORS:
-            try:
-                if await page.query_selector(selector):
-                    return True
-            except Exception:
-                continue
-
-        return False
-    except Exception as exc:
-        logging.debug("URL check failed: %s (%s)", url, exc)
-        return False
+        await asyncio.wait(
+            (check_task, rate_limit_task), return_when=asyncio.FIRST_COMPLETED
+        )
+        if rate_limited.is_set():
+            raise RegionNavigationError(f"HTTP 429: {rate_limit_url[-1]}")
+        result = await check_task
+        if rate_limited.is_set():
+            raise RegionNavigationError(f"HTTP 429: {rate_limit_url[-1]}")
+        return result
     finally:
+        page.remove_listener("response", observe_response)
+        for task in (check_task, rate_limit_task):
+            if not task.done():
+                task.cancel()
+        await asyncio.gather(check_task, rate_limit_task, return_exceptions=True)
         await page.close()
 
 
@@ -120,23 +145,47 @@ async def validate_regions(data: dict[str, Any]) -> dict[tuple[str, ...], bool]:
 
         chunk_size = max(1, MAX_CONCURRENT_TABS)
 
-        for i in range(0, total, chunk_size):
-            chunk = all_tasks[i : i + chunk_size]
-            checks = [check_url(context, node["url"]) for _, node in chunk]
-            flags = await asyncio.gather(*checks)
+        try:
+            for i in range(0, total, chunk_size):
+                chunk = all_tasks[i : i + chunk_size]
+                check_tasks = [
+                    asyncio.create_task(check_url(context, node["url"], path[-1]))
+                    for path, node in chunk
+                ]
+                try:
+                    flags = await asyncio.gather(*check_tasks)
+                except BaseException:
+                    for task in check_tasks:
+                        if not task.done():
+                            task.cancel()
+                    await asyncio.gather(*check_tasks, return_exceptions=True)
+                    raise
 
-            for (path, _node), flag in zip(chunk, flags):
-                results[tuple(path)] = flag
+                for (path, _node), flag in zip(chunk, flags):
+                    results[tuple(path)] = flag
 
-            processed = min(i + chunk_size, total)
-            logging.info("Progress: %s/%s", processed, total)
-
-        await browser.close()
+                processed = min(i + chunk_size, total)
+                logging.info("Progress: %s/%s", processed, total)
+        finally:
+            await browser.close()
 
     return results
 
 
 def apply_updates(data: dict[str, Any], results: dict[tuple[str, ...], bool]) -> None:
+    required_paths = {tuple(path) for path, _node in collect_leaf_tasks(data)}
+    missing_paths = required_paths.difference(results)
+    if missing_paths:
+        formatted = ", ".join(" > ".join(path) for path in sorted(missing_paths))
+        raise ValueError(f"missing validation results for leaf regions: {formatted}")
+
+    invalid_paths = [
+        path for path in required_paths if not isinstance(results[path], bool)
+    ]
+    if invalid_paths:
+        formatted = ", ".join(" > ".join(path) for path in sorted(invalid_paths))
+        raise ValueError(f"invalid validation results for leaf regions: {formatted}")
+
     def walk(node: dict[str, Any], current_path: list[str]) -> bool:
         children = node.get("children")
         if isinstance(children, dict) and children:
@@ -148,7 +197,11 @@ def apply_updates(data: dict[str, Any], results: dict[tuple[str, ...], bool]) ->
             node["has_complexes"] = any_child_valid
             return any_child_valid
 
-        flag = results.get(tuple(current_path), False)
+        path = tuple(current_path)
+        if "url" not in node:
+            return node.get("has_complexes") is True
+
+        flag = results[path]
         node["has_complexes"] = flag
         return flag
 

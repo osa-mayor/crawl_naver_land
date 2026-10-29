@@ -15,6 +15,7 @@ import hashlib
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 from land_selectors import NaverLandSelectors
+from region_navigation import navigate_region, read_region_total, RegionNavigationError
 
 # ==========================================
 # [Configuration]
@@ -224,11 +225,11 @@ class NaverLandPlaywright:
         self.captured_articles = {}
         self.article_response_stats = {}
         self.article_pagination_states = {}
-        self.seen_article_response_keys = set()
         self.article_response_tasks = {}
         self.article_seen_ids = {}
         self.region_results = []
         self.list_inventories = {}
+        self.region_resolutions = {}
         self.article_attempts = set()
         self.article_missing_responses = []
         self.failed_regions = []
@@ -334,18 +335,6 @@ class NaverLandPlaywright:
             return value if isinstance(value, list) else []
         return []
 
-    def _article_response_key(self, response, request_body=None):
-        post_data = ""
-        if request_body:
-            post_data = json.dumps(request_body, sort_keys=True, ensure_ascii=False)
-        else:
-            try:
-                request = getattr(response, "request", None)
-                post_data = request.post_data if request is not None else ""
-            except Exception:
-                pass
-        return (response.status, response.url, post_data)
-
     @staticmethod
     def _trade_type_keys(trade_type):
         if not trade_type:
@@ -413,22 +402,35 @@ class NaverLandPlaywright:
     async def _record_article_response(self, response, request_body=None):
         if not self._is_article_api_url(response.url):
             return False
-        key = self._article_response_key(response, request_body)
-        if key in self.seen_article_response_keys:
-            return True
-        # Event listener and expect_response must join the same parsing task.
+        # Join consumers of this response, not later responses to the same URL/body.
+        key = response
         task = self.article_response_tasks.get(key)
         if task is None:
             task = asyncio.create_task(self._parse_article_response(response, request_body))
             self.article_response_tasks[key] = task
         try:
-            valid = await asyncio.shield(task)
-            if valid:
-                self.seen_article_response_keys.add(key)
-            return valid
+            # A timed-out attempt must not keep parsing into the next attempt.
+            return await task
         finally:
             if task.done() and self.article_response_tasks.get(key) is task:
                 self.article_response_tasks.pop(key, None)
+
+    def _reset_article_pair(self, cid, trade_type):
+        """Retry a fresh snapshot without mixing old/deleted listings into it."""
+        cid, trade_type = str(cid), str(trade_type)
+        key = (cid, trade_type)
+        for state in (self.article_response_stats, self.article_pagination_states,
+                      self.article_seen_ids):
+            state.pop(key, None)
+        self.article_attempts.discard(key)
+        remaining = [
+            item for item in self.captured_articles.get(cid, [])
+            if (item.get('representativeArticleInfo') or item).get('tradeType') != trade_type
+        ]
+        if remaining:
+            self.captured_articles[cid] = remaining
+        else:
+            self.captured_articles.pop(cid, None)
 
     async def _parse_article_response(self, response, request_body=None):
         cid, trade_type = self._extract_article_identity(response, request_body)
@@ -555,7 +557,10 @@ class NaverLandPlaywright:
             state = new_state
             await self._wait_buffer(0.15, 0.35)
         if not self._has_complete_article_response(cid, trade_type):
-            raise ArticleResponseUnavailable(f'article total mismatch: {cid} {trade_type}')
+            raise ArticleResponseUnavailable(
+                f'article total mismatch: {cid} {trade_type}; '
+                f'unique={len(self.article_seen_ids.get(key, set()))} '
+                f'expected={state.get("total_count")} has_next={state.get("has_next_page")}')
         logging.info('Article collection COMPLETE %s (%s): unique=%s extra_pages=%s',
                      cid, trade_type, len(self.article_seen_ids.get(key, set())), extra_pages)
         return extra_pages
@@ -703,7 +708,7 @@ class NaverLandPlaywright:
                 await asyncio.sleep(5 * attempt)
         return False
 
-    async def _load_region_complexes(self, page, target_url):
+    async def _load_region_complexes(self, page, target_url, region_name=None):
         """Observe throttling before navigation, including region/auth API responses."""
         if self.blocking_error or self.rate_limit_count:
             raise ArticleResponseUnavailable(self.blocking_error or "paused after HTTP 429")
@@ -715,7 +720,7 @@ class NaverLandPlaywright:
                 self.blocking_error = f'HTTP 429: {response.url}; pause before retry'
                 blocked.set()
         page.on('response', observe)
-        loader = asyncio.create_task(self._load_region_inventory(page, target_url))
+        loader = asyncio.create_task(self._load_region_inventory(page, target_url, region_name))
         waiter = asyncio.create_task(blocked.wait())
         try:
             done, _ = await asyncio.wait((loader, waiter), return_when=asyncio.FIRST_COMPLETED)
@@ -729,32 +734,18 @@ class NaverLandPlaywright:
                     task.cancel()
             await asyncio.gather(loader, waiter, return_exceptions=True)
 
-    async def _load_region_inventory(self, page, target_url):
+    async def _load_region_inventory(self, page, target_url, region_name=None):
         """Load the full unfiltered inventory, proving count before filtering."""
-        response = await page.goto(target_url, wait_until='domcontentloaded', timeout=60000)
-        expected_url = urlparse(target_url)
-        actual_url = urlparse(page.url)
-        if (actual_url.netloc, actual_url.path, parse_qs(actual_url.query)) != (expected_url.netloc, expected_url.path, parse_qs(expected_url.query)):
-            self.blocking_error = f'region redirect: {target_url} -> {page.url}'
-            raise ArticleResponseUnavailable(self.blocking_error)
-        if response is not None and response.status >= 400:
-            self.blocking_error = f'region HTTP {response.status}: {page.url}'
-            raise ArticleResponseUnavailable(self.blocking_error)
-        # A total label can render before the initial cards. Wait for both,
-        # rather than assuming a fixed delay means the list has loaded.
-        await page.wait_for_function(r"""() => {
-            const match = document.body.innerText.match(/총\s*([\d,]+)\s*개\s*단지/);
-            if (!match) return false;
-            if (Number(match[1].replaceAll(',', '')) === 0) return true;
-            return [...document.querySelectorAll('a[href^="/complexes/"]')].some(a =>
-                /^\/complexes\/\d+$/.test(a.getAttribute('href') || '') &&
-                a.closest('li')?.querySelector('strong[class*="name"]')?.textContent?.trim());
-        }""", timeout=20000)
-        text = await page.locator('body').inner_text()
-        match = re.search(r'총\s*([\d,]+)\s*개\s*단지', text)
-        if not match:
-            raise ArticleResponseUnavailable('region total is missing')
-        expected = int(match.group(1).replace(',', ''))
+        self.region_resolutions.pop(target_url, None)
+        try:
+            resolved = await navigate_region(page, target_url, region_name)
+        except RegionNavigationError as exc:
+            self.blocking_error = str(exc)
+            raise ArticleResponseUnavailable(self.blocking_error) from exc
+        if resolved['url'] != target_url:
+            self.region_resolutions[target_url] = resolved
+            logging.info('Region resolved %s -> %s (%s)', target_url, resolved['url'], resolved['name'])
+        expected = await read_region_total(page)
         inventory = {}
         for _ in range(1000):
             if self.blocking_error or self.rate_limit_count:
@@ -804,8 +795,12 @@ class NaverLandPlaywright:
             await response.dispose()
 
     async def _process_region_tab_once(self, page, target_url, dong_name):
-        rows = await self._load_region_complexes(page, target_url)
+        rows = await self._load_region_complexes(page, target_url, dong_name.rsplit(' ', 1)[-1])
         self.list_inventories[target_url] = {'total':len(rows), 'ids':[r['id'] for r in rows]}
+        resolved = self.region_resolutions.get(target_url)
+        if resolved:
+            dong_name = dong_name.rsplit(' ', 1)[0] + ' ' + resolved['name']
+            self.list_inventories[target_url].update(resolved_url=resolved['url'], resolved_name=dong_name)
         filtered_cids = []
         for row in rows:
             badge = row['badge']
@@ -871,6 +866,9 @@ class NaverLandPlaywright:
 
             for attempt in range(1, retries + 2):
                 try:
+                    if self.blocking_error or self.rate_limit_count:
+                        raise ArticleResponseUnavailable(self.blocking_error or 'paused after HTTP 429')
+                    self._reset_article_pair(cid, t_type)
                     if await asyncio.wait_for(
                         self._visit_detail_page_and_wait_for_article(
                             current_page, detail_url, cid, t_type
@@ -897,7 +895,7 @@ class NaverLandPlaywright:
                         retries + 1,
                         e,
                     )
-                    if attempt > retries or self.rate_limit_count:
+                    if attempt > retries or self.rate_limit_count or self.blocking_error:
                         self.article_missing_responses.append(
                             {"complex_no": str(cid), "trade_type": str(t_type)}
                         )
@@ -929,7 +927,7 @@ class NaverLandPlaywright:
         # 5. Visit Details (Trigger article list)
         for cid in filtered_cids:
             for t_type in ["A1", "B1"]:
-                if self.rate_limit_count:
+                if self.rate_limit_count or self.blocking_error:
                     return False
                 page = await visit_detail_with_retries(page, cid, t_type)
 
